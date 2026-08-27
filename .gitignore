@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+
+node_modules/
+build/
+.svelte-kit/
+dist/
+src-tauri/gen/
+.vscode/
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# local Sierra / journal data must never be committed
+*.scid
+trading-journal.db

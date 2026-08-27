@@ -1,0 +1,32 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --panel: #121821;
+  --panel-2: #0e141c;
+  --text: #e8edf5;
+  --muted: #8b9bb4;
+  --up: #3ddc97;
+  --down: #ff5c5c;
+  --live: #3ddc97;
+  --stale: #f5c542;
+  --border: #243044;
+  --gap: 14px;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, "JetBrains Mono", "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}

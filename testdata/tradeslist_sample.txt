@@ -1,0 +1,3 @@
+Symbol	Trade Type	Entry DateTime	Exit DateTime	Entry Price	Exit Price	Trade Quantity	Profit/Loss (C)	Account
+NQU6.CME	Short	2026-08-24  21:06:12.000	2026-08-24  21:07:41.000	29128	29123	2	195	SIM1
+MESU26_FUT_CME	Long	2026-08-20  14:30:00.000	2026-08-20  14:35:00.000	6400	6402	1	25	SIM1

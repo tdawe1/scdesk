@@ -1,0 +1,12 @@
+[package]
+name = "journal-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Trade journal storage and SCS NDJSON import (phase 2)"
+
+[dependencies]
+contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true

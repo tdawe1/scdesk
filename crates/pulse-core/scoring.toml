@@ -1,0 +1,21 @@
+# scdesk Pulse scoring weights. Values in a table must sum to 1.0;
+# the engine renormalizes if they do not.
+#
+# Quality (0–100) is direction-agnostic: a clean downtrend can score 90.
+# Bias is a separate signed reading.
+
+[day]
+volatility = 0.25
+momentum = 0.20
+trend = 0.20
+breadth = 0.15
+macro = 0.10
+execution = 0.10
+
+[swing]
+volatility = 0.15
+momentum = 0.20
+trend = 0.25
+breadth = 0.20
+macro = 0.15
+execution = 0.05
