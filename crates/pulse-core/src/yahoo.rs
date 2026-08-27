@@ -45,6 +45,18 @@ pub const BREADTH_SYMBOLS: &[&str] = &[
     "WFC", "GS", "NKE", "PM", "INTC", "QCOM", "TXN", "GE", "RTX", "BA", "SPGI",
 ];
 
+pub const MEGA_CAPS: &[&str] = &[
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "AVGO", "TSLA", "BRK-B", "JPM", "UNH", "XOM",
+    "LLY", "V", "MA", "HD", "PG", "COST", "JNJ", "WMT", "ABBV", "NFLX", "CRM", "ORCL", "KO", "PEP",
+    "BAC", "CVX", "MRK", "AMD",
+];
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EarnEvent {
+    pub symbol: String,
+    pub ts: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quote {
     pub id: String,
@@ -298,6 +310,51 @@ async fn fetch_one_chart(
     );
     let body = get_text(client, &url).await?;
     parse_chart_json(id, yahoo, &body)
+}
+
+pub fn parse_earnings_json(symbol: &str, body: &str) -> Option<EarnEvent> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let dates = v
+        .pointer("/quoteSummary/result/0/calendarEvents/earnings/earningsDate")
+        .and_then(|x| x.as_array())?;
+    let raw = dates
+        .iter()
+        .filter_map(|d| d.get("raw").and_then(|r| r.as_i64()))
+        .min()?;
+    Some(EarnEvent {
+        symbol: symbol.to_string(),
+        ts: raw,
+    })
+}
+
+pub async fn fetch_earnings(
+    client: &reqwest::Client,
+    symbols: &[&str],
+) -> Vec<EarnEvent> {
+    let mut set = tokio::task::JoinSet::new();
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
+    for s in symbols {
+        let client = client.clone();
+        let s = (*s).to_string();
+        let sem = sem.clone();
+        set.spawn(async move {
+            let _p = sem.acquire().await;
+            let url = format!(
+                "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{}?modules=calendarEvents",
+                urlencoding_lite(&s)
+            );
+            let body = get_text(&client, &url).await.ok()?;
+            parse_earnings_json(&s, &body)
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(j) = set.join_next().await {
+        if let Ok(Some(e)) = j {
+            out.push(e);
+        }
+    }
+    out.sort_by_key(|e| e.ts);
+    out
 }
 
 pub async fn fetch_history(client: &reqwest::Client, yahoo: &str) -> Result<Vec<Bar>, QuoteError> {

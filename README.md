@@ -9,7 +9,7 @@ Independent implementation. Not affiliated with Sierra Chart or SCS.
 
 ## Status
 
-Phase 1: Pulse quality score, DAY/SWING, six pillars, economic calendar. Journal still a stub (phase 2).
+Phase 1: Pulse dashboard with scoring, calendar, alerts, heatmap. Journal is still a stub (phase 2).
 
 ## Requirements
 

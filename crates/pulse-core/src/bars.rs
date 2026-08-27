@@ -155,6 +155,43 @@ pub fn adx(bars: &[Bar], n: usize) -> Option<f64> {
     sma(&dxs, n)
 }
 
+pub fn daily_returns(closes: &[f64]) -> Vec<f64> {
+    closes.windows(2).map(|w| (w[1] - w[0]) / w[0].max(1e-9)).collect()
+}
+
+pub fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+    let n = a.len().min(b.len());
+    if n < 5 {
+        return None;
+    }
+    let a = &a[a.len() - n..];
+    let b = &b[b.len() - n..];
+    let ma = a.iter().sum::<f64>() / n as f64;
+    let mb = b.iter().sum::<f64>() / n as f64;
+    let mut num = 0.0;
+    let mut da = 0.0;
+    let mut db = 0.0;
+    for i in 0..n {
+        let x = a[i] - ma;
+        let y = b[i] - mb;
+        num += x * y;
+        da += x * x;
+        db += y * y;
+    }
+    let den = (da * db).sqrt();
+    if den < 1e-12 {
+        return None;
+    }
+    Some((num / den).clamp(-1.0, 1.0))
+}
+
+pub fn last_up(bars: &[Bar]) -> Option<bool> {
+    if bars.len() < 2 {
+        return None;
+    }
+    Some(bars[bars.len() - 1].close > bars[bars.len() - 2].close)
+}
+
 pub fn overlay_last_close(bars: &mut [Bar], last: f64, now_unix: i64) {
     let Some(bar) = bars.last_mut() else {
         return;

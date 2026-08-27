@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use pulse_core::{Mode, PulseDashboard, PulseEngine, ScoreConfig, YahooQuoteSource};
+use pulse_core::{Mode, PulseDashboard, PulseEngine, PulseSettings, ScoreConfig, YahooQuoteSource};
 
 struct AppState {
     yahoo: YahooQuoteSource,
@@ -51,18 +51,11 @@ async fn set_mode(
 }
 
 #[tauri::command]
-async fn get_settings(state: tauri::State<'_, AppState>) -> Result<PulseSettingsView, String> {
+async fn get_settings(state: tauri::State<'_, AppState>) -> Result<PulseSettings, String> {
     let eng = state.engine.lock().await;
-    Ok(PulseSettingsView {
-        mode: eng.settings().mode.as_str().to_string(),
-        has_fmp_key: !eng.settings().fmp_api_key.is_empty(),
-    })
-}
-
-#[derive(serde::Serialize)]
-struct PulseSettingsView {
-    mode: String,
-    has_fmp_key: bool,
+    let mut s = eng.settings().clone();
+    s.fmp_api_key.clear();
+    Ok(s)
 }
 
 #[tauri::command]
@@ -70,6 +63,16 @@ async fn set_fmp_key(state: tauri::State<'_, AppState>, key: String) -> Result<(
     let mut eng = state.engine.lock().await;
     eng.set_fmp_key(key);
     Ok(())
+}
+
+#[tauri::command]
+async fn save_settings(
+    state: tauri::State<'_, AppState>,
+    settings: PulseSettings,
+) -> Result<PulseDashboard, String> {
+    let mut eng = state.engine.lock().await;
+    eng.update_settings(settings);
+    eng.refresh(&state.yahoo, false).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -86,7 +89,8 @@ pub fn run() {
             get_dashboard,
             set_mode,
             get_settings,
-            set_fmp_key
+            set_fmp_key,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

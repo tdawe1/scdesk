@@ -49,6 +49,16 @@
     calendar: CalEvent[];
     score_history: { ts: number; composite: number }[];
     has_fmp_key: boolean;
+    poll_secs: number;
+    theme: string;
+    zoom: number;
+    pre_event_alert_min: number;
+    alert_on_release: boolean;
+    alert_on_decision: boolean;
+    correlations: { symbol: string; corr: number }[];
+    earnings: { symbol: string; ts: number }[];
+    banners: { level: string; text: string }[];
+    fired_alerts: { kind: string; text: string }[];
   };
 
   const CORE = ["SPY", "QQQ", "VIX", "TNX", "DXY"];
@@ -61,6 +71,29 @@
   let now = $state(Math.floor(Date.now() / 1000));
   let settingsOpen = $state(false);
   let fmpDraft = $state("");
+  let showHigh = $state(true);
+  let showMed = $state(true);
+  let showLow = $state(true);
+  let showDone = $state(false);
+  let countryOn = $state<Record<string, boolean>>({});
+  let lastAlertKey = $state("");
+
+  const countries = $derived(
+    [...new Set((dash?.calendar ?? []).map((e) => e.country))].sort(),
+  );
+  const filteredCal = $derived(
+    (dash?.calendar ?? []).filter((e) => {
+      if (e.impact === "High" && !showHigh) return false;
+      if (e.impact === "Medium" && !showMed) return false;
+      if (e.impact === "Low" && !showLow) return false;
+      if (!showDone && e.ts < now) return false;
+      const active = Object.entries(countryOn)
+        .filter(([, v]) => v)
+        .map(([k]) => k);
+      if (active.length && !active.includes(e.country)) return false;
+      return true;
+    }),
+  );
 
   const coreQuotes = $derived(
     (dash?.quotes ?? []).filter((q) => CORE.includes(q.id)),
@@ -188,20 +221,94 @@
       ev.preventDefault();
       void refresh(true);
     }
+    if (ev.key === "Delete") {
+      ev.preventDefault();
+      void getCurrentWindow().minimize();
+    }
   }
+
+  function beep() {
+    const ctx = new AudioContext();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.frequency.value = 880;
+    g.gain.value = 0.06;
+    o.start();
+    o.stop(ctx.currentTime + 0.12);
+  }
+
+  function toast(text: string) {
+    beep();
+    if (typeof Notification !== "undefined") {
+      if (Notification.permission === "granted") {
+        new Notification("scdesk Pulse", { body: text });
+      } else if (Notification.permission !== "denied") {
+        void Notification.requestPermission();
+      }
+    }
+  }
+
+  async function persist(partial: Record<string, unknown>) {
+    if (!dash) return;
+    const settings = {
+      mode: dash.mode,
+      fmp_api_key: fmpDraft,
+      poll_secs: dash.poll_secs,
+      theme: dash.theme,
+      zoom: dash.zoom,
+      pre_event_alert_min: dash.pre_event_alert_min,
+      alert_on_release: dash.alert_on_release,
+      alert_on_decision: dash.alert_on_decision,
+      ...partial,
+    };
+    try {
+      dash = await invoke<Dashboard>("save_settings", { settings });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function fitZoom() {
+    const z = Math.max(
+      100,
+      Math.min(180, Math.floor(Math.min(window.innerWidth / 1280, window.innerHeight / 860) * 100)),
+    );
+    void persist({ zoom: z });
+  }
+
+  $effect(() => {
+    const theme = dash?.theme ?? "dark";
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.setProperty("--zoom", String((dash?.zoom ?? 100) / 100));
+  });
+
+  $effect(() => {
+    const alerts = dash?.fired_alerts ?? [];
+    if (!alerts.length) return;
+    const key = alerts.map((a) => a.text).join("|");
+    if (key === lastAlertKey) return;
+    lastAlertKey = key;
+    for (const a of alerts) toast(a.text);
+  });
 
   onMount(() => {
     void refresh(true);
-    const poll = setInterval(() => void refresh(false), POLL_MS);
     const clock = setInterval(() => {
       now = Math.floor(Date.now() / 1000);
     }, 1000);
     window.addEventListener("keydown", onKey);
     return () => {
-      clearInterval(poll);
       clearInterval(clock);
       window.removeEventListener("keydown", onKey);
     };
+  });
+
+  $effect(() => {
+    const ms = Math.max(15, dash?.poll_secs ?? 30) * 1000;
+    const poll = setInterval(() => void refresh(false), ms);
+    return () => clearInterval(poll);
   });
 </script>
 
@@ -224,10 +331,44 @@
     {#if error}
       <div class="err" title={error}>{error}</div>
     {/if}
+    <label class="clock">poll
+      <select
+        value={String(dash?.poll_secs ?? 30)}
+        onchange={(e) => persist({ poll_secs: Number(e.currentTarget.value) })}
+      >
+        <option value="15">15s</option>
+        <option value="30">30s</option>
+        <option value="45">45s</option>
+        <option value="120">2m</option>
+      </select>
+    </label>
+    <label class="clock">zoom
+      <select
+        value={String(dash?.zoom ?? 100)}
+        onchange={(e) => persist({ zoom: Number(e.currentTarget.value) })}
+      >
+        {#each [100, 110, 125, 150, 180] as z}
+          <option value={z}>{z}%</option>
+        {/each}
+      </select>
+    </label>
+    <button type="button" onclick={fitZoom}>FIT</button>
+    <button
+      type="button"
+      onclick={() => persist({ theme: dash?.theme === "light" ? "dark" : "light" })}
+    >{dash?.theme === "light" ? "dark" : "light"}</button>
     <button type="button" onclick={() => refresh(true)}>refresh</button>
     <button type="button" class:on={pinned} onclick={togglePin}>{pinned ? "pinned" : "pin"}</button>
     <button type="button" onclick={() => (settingsOpen = true)}>settings</button>
   </header>
+
+  {#if dash?.banners?.length}
+    <div class="banners">
+      {#each dash.banners as b}
+        <div class="banner {b.level}">{b.text}</div>
+      {/each}
+    </div>
+  {/if}
 
   <section class="block">
     <h2>Indexes</h2>
@@ -297,7 +438,20 @@
     </section>
 
     <section class="block">
-      <h2>Pillars <span>{dash.mode.toUpperCase()} weights</span></h2>
+      <h2>Weights</h2>
+      <div class="weights">
+        {#each s.pillars as p}
+          <div class="wcol">
+            <i style="height: {Math.round(p.weight * 100)}%"></i>
+            <span>{p.name.slice(0, 3)}</span>
+            <b>{Math.round(p.weight * 100)}%</b>
+          </div>
+        {/each}
+      </div>
+    </section>
+
+    <section class="block">
+      <h2>Pillars <span>{dash.mode.toUpperCase()}</span></h2>
       <div class="pillars">
         {#each s.pillars as p (p.id)}
           <article>
@@ -314,6 +468,26 @@
               {/each}
             </dl>
           </article>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
+  {#if dash?.correlations?.length}
+    <section class="block">
+      <h2>SPY 20d correlation</h2>
+      <div class="heat">
+        {#each dash.correlations as c}
+          <div
+            class="hcell"
+            style="background: color-mix(in srgb, {c.corr >= 0 ? 'var(--up)' : 'var(--down)'} {Math.round(
+              Math.abs(c.corr) * 85,
+            )}%, var(--panel))"
+            title="{c.symbol} {c.corr.toFixed(2)}"
+          >
+            <span>{c.symbol}</span>
+            <b>{c.corr.toFixed(2)}</b>
+          </div>
         {/each}
       </div>
     </section>
@@ -343,13 +517,26 @@
 
   <section class="block cal-block">
     <h2>Calendar <span>this week</span></h2>
+    <div class="chips">
+      <button class:on={showHigh} onclick={() => (showHigh = !showHigh)}>High</button>
+      <button class:on={showMed} onclick={() => (showMed = !showMed)}>Medium</button>
+      <button class:on={showLow} onclick={() => (showLow = !showLow)}>Low</button>
+      <button class:on={showDone} onclick={() => (showDone = !showDone)}>Done</button>
+      {#each countries as c}
+        <button
+          class:on={countryOn[c] !== false}
+          onclick={() => (countryOn = { ...countryOn, [c]: countryOn[c] === false })}
+        >{c}</button>
+      {/each}
+    </div>
     <div class="cal">
-      {#if dash?.calendar?.length}
-        {#each dash.calendar as e, i (e.ts + e.title + i)}
+      {#if filteredCal.length}
+        {#each filteredCal as e, i (e.ts + e.title + i)}
           <div
             class="ev"
             class:high={e.impact === "High"}
             class:macro={e.is_macro}
+            class:soon={e.ts - now < 3600 && e.ts >= now}
             class:imminent={e.ts - now < 300 && e.ts >= now}
           >
             <div class="when">{countdown(e.ts)}</div>
@@ -374,19 +561,44 @@
     <div class="panel">
       <h2>settings</h2>
       <p class="k">
-        Optional Financial Modeling Prep key fills Actual values on the calendar. Stored in
-        ~/.config/scdesk/pulse.toml.
+        FMP key fills Actuals and is the calendar fallback if Forex Factory is down.
       </p>
       <input
         type="password"
         placeholder={dash?.has_fmp_key ? "key saved — paste to replace" : "FMP API key"}
         bind:value={fmpDraft}
       />
+      <label class="k">pre-event alert
+        <select
+          value={String(dash?.pre_event_alert_min ?? 15)}
+          onchange={(e) => persist({ pre_event_alert_min: Number(e.currentTarget.value) })}
+        >
+          <option value="0">off</option>
+          <option value="5">5m</option>
+          <option value="15">15m</option>
+          <option value="30">30m</option>
+          <option value="60">60m</option>
+        </select>
+      </label>
+      <label class="k"
+        ><input
+          type="checkbox"
+          checked={dash?.alert_on_decision ?? true}
+          onchange={(e) => persist({ alert_on_decision: e.currentTarget.checked })}
+        /> alert on decision / bias</label
+      >
+      <label class="k"
+        ><input
+          type="checkbox"
+          checked={dash?.alert_on_release ?? false}
+          onchange={(e) => persist({ alert_on_release: e.currentTarget.checked })}
+        /> alert on actuals</label
+      >
       <div class="row">
-        <button type="button" onclick={saveKey}>save</button>
+        <button type="button" onclick={saveKey}>save key</button>
         <button type="button" onclick={() => (settingsOpen = false)}>close</button>
       </div>
-      <p class="k">keys: D day · S swing · T pin · Ctrl+R refresh</p>
+      <p class="k">keys: D day · S swing · T pin · Ctrl+R refresh · Del minimize</p>
     </div>
   </div>
 {/if}
@@ -781,5 +993,82 @@
   .row {
     display: flex;
     gap: 8px;
+  }
+  select {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font: inherit;
+    margin-left: 4px;
+  }
+  .banners {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .banner {
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-weight: 700;
+    border: 1px solid var(--border);
+  }
+  .banner.red {
+    background: #3a1515;
+    color: var(--down);
+  }
+  .banner.yellow {
+    background: #3a3210;
+    color: var(--stale);
+  }
+  .banner.orange {
+    background: #3a2410;
+    color: #f0a050;
+  }
+  .weights {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    min-height: 110px;
+  }
+  .wcol {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    height: 90px;
+  }
+  .wcol i {
+    width: 18px;
+    background: var(--live);
+    border-radius: 3px 3px 0 0;
+    min-height: 4px;
+  }
+  .heat {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+    gap: 8px;
+  }
+  .hcell {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .ev.soon {
+    border-color: #c47a22;
   }
 </style>

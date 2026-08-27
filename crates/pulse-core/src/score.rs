@@ -231,6 +231,13 @@ pub struct ScoreInputs {
     pub follow_through: Option<f64>,
     pub close_loc: Option<f64>,
     pub failed_break: Option<bool>,
+    pub pcr_est: Option<f64>,
+    pub vol_bias: Option<String>,
+    pub adv_dec: Option<f64>,
+    pub st_health: Option<String>,
+    pub fed_stance: Option<String>,
+    pub breakdowns_hold: Option<bool>,
+    pub bounce_fail: Option<bool>,
 }
 
 pub fn score(inputs: &ScoreInputs, cfg: &ScoreConfig, mode: Mode) -> ScoreResult {
@@ -342,6 +349,16 @@ fn volatility(i: &ScoreInputs) -> (f64, Vec<Metric>) {
             "high = unstable",
         ),
         metric("5d slope", fmt_opt(i.vix_slope_5, 2), "stable is better"),
+        metric(
+            "est. put/call",
+            fmt_opt(i.pcr_est, 2),
+            "from VIX percentile, not CBOE",
+        ),
+        metric(
+            "vol bias",
+            i.vol_bias.clone().unwrap_or_else(|| "n/a".into()),
+            "level + slope",
+        ),
     ];
     (score, metrics)
 }
@@ -372,6 +389,12 @@ fn momentum(i: &ScoreInputs) -> (f64, Vec<Metric>) {
             "sector spread 5d",
             fmt_opt(i.sector_spread_5d, 2),
             "leader − laggard",
+        ),
+        metric("Adv/Dec", fmt_opt(i.adv_dec, 0), "% of basket up today"),
+        metric(
+            "ST health",
+            i.st_health.clone().unwrap_or_else(|| "n/a".into()),
+            "SMA20 + 5d",
         ),
     ];
     (score, metrics)
@@ -515,6 +538,11 @@ fn macro_pillar(i: &ScoreInputs) -> (f64, Vec<Metric>) {
             },
             "near events cut score",
         ),
+        metric(
+            "Fed stance",
+            i.fed_stance.clone().unwrap_or_else(|| "n/a".into()),
+            "from 10Y 20d change",
+        ),
     ];
     (score, metrics)
 }
@@ -538,7 +566,17 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
         Some(false) => 80.0,
         None => missing(),
     };
-    let score = 0.5 * ft + 0.3 * loc + 0.2 * brk;
+    let hold = match i.breakdowns_hold {
+        Some(true) => 80.0,
+        Some(false) => 40.0,
+        None => missing(),
+    };
+    let bounce = match i.bounce_fail {
+        Some(true) => 35.0,
+        Some(false) => 75.0,
+        None => missing(),
+    };
+    let score = 0.35 * ft + 0.20 * loc + 0.15 * brk + 0.15 * hold + 0.15 * bounce;
     let metrics = vec![
         metric(
             "follow-through",
@@ -548,15 +586,29 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
         metric("close in range", fmt_opt(i.close_loc, 2), "0=low 1=high"),
         metric(
             "failed break",
-            match i.failed_break {
-                Some(true) => "yes".into(),
-                Some(false) => "no".into(),
-                None => "n/a".into(),
-            },
+            yn(i.failed_break),
             "10d high/low then reverse",
+        ),
+        metric(
+            "breakdowns hold",
+            yn(i.breakdowns_hold),
+            "downtrend closes still below SMA20",
+        ),
+        metric(
+            "bounce fail",
+            yn(i.bounce_fail),
+            "up-bar still closes weak",
         ),
     ];
     (score, metrics)
+}
+
+fn yn(v: Option<bool>) -> String {
+    match v {
+        Some(true) => "yes".into(),
+        Some(false) => "no".into(),
+        None => "n/a".into(),
+    }
 }
 
 fn bias(i: &ScoreInputs) -> Bias {
@@ -679,6 +731,9 @@ mod tests {
             follow_through: Some(5.0),
             close_loc: Some(0.8),
             failed_break: Some(false),
+            breakdowns_hold: Some(false),
+            bounce_fail: Some(false),
+            ..ScoreInputs::default()
         };
         let cfg = ScoreConfig::default();
         let a = score(&up, &cfg, Mode::Day);

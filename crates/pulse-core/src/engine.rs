@@ -1,22 +1,20 @@
 //! Assemble quotes + history + calendar into a Pulse dashboard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::bars::{
-    above_sma_frac, adx, closes, overlay_last_close, pct_change, percentile_rank, rsi, slope, sma,
-    Bar,
+    above_sma_frac, adx, closes, daily_returns, last_up, overlay_last_close, pct_change,
+    pearson, percentile_rank, rsi, slope, sma, Bar,
 };
-use crate::calendar::{
-    days_to_next_macro, fetch_fmp_actuals, fetch_forex_factory, strip_events, CalEvent,
-};
+use crate::calendar::{days_to_next_macro, fetch_calendar, CalEvent};
 use crate::score::{score, Mode, ScoreConfig, ScoreInputs, ScoreResult};
 use crate::yahoo::{
-    fetch_history, fetch_spots, unix_now, YahooQuoteSource, BREADTH_SYMBOLS, CORE_SYMBOLS,
-    HISTORY_CACHE_SECS, SECTOR_SYMBOLS, SPOT_CACHE_SECS,
+    fetch_earnings, fetch_history, fetch_spots, unix_now, EarnEvent, YahooQuoteSource,
+    BREADTH_SYMBOLS, CORE_SYMBOLS, HISTORY_CACHE_SECS, MEGA_CAPS, SECTOR_SYMBOLS, SPOT_CACHE_SECS,
 };
 use crate::{Quote, QuoteSnapshot};
 
@@ -24,11 +22,37 @@ const CAL_MEM_SECS: i64 = 5 * 60;
 const CAL_DISK_SECS: i64 = 30 * 60;
 const SCORE_HIST_SECS: i64 = 6 * 3600;
 
+fn default_poll() -> u64 {
+    30
+}
+fn default_theme() -> String {
+    "dark".into()
+}
+fn default_zoom() -> u32 {
+    100
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PulseSettings {
     pub mode: Mode,
     #[serde(default)]
     pub fmp_api_key: String,
+    #[serde(default = "default_poll")]
+    pub poll_secs: u64,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_zoom")]
+    pub zoom: u32,
+    #[serde(default)]
+    pub pre_event_alert_min: u32,
+    #[serde(default)]
+    pub alert_on_release: bool,
+    #[serde(default = "default_true")]
+    pub alert_on_decision: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for PulseSettings {
@@ -36,8 +60,32 @@ impl Default for PulseSettings {
         Self {
             mode: Mode::Day,
             fmp_api_key: String::new(),
+            poll_secs: 30,
+            theme: "dark".into(),
+            zoom: 100,
+            pre_event_alert_min: 15,
+            alert_on_release: false,
+            alert_on_decision: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SectorCorr {
+    pub symbol: String,
+    pub corr: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Banner {
+    pub level: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FiredAlert {
+    pub kind: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +105,16 @@ pub struct PulseDashboard {
     pub calendar: Vec<CalEvent>,
     pub score_history: Vec<ScorePoint>,
     pub has_fmp_key: bool,
+    pub poll_secs: u64,
+    pub theme: String,
+    pub zoom: u32,
+    pub pre_event_alert_min: u32,
+    pub alert_on_release: bool,
+    pub alert_on_decision: bool,
+    pub correlations: Vec<SectorCorr>,
+    pub earnings: Vec<EarnEvent>,
+    pub banners: Vec<Banner>,
+    pub fired_alerts: Vec<FiredAlert>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,6 +139,9 @@ pub struct PulseEngine {
     spots: Option<QuoteSnapshot>,
     last: Option<PulseDashboard>,
     score_history: Vec<ScorePoint>,
+    earnings: Vec<EarnEvent>,
+    earnings_at: i64,
+    alerted: HashSet<String>,
 }
 
 impl PulseEngine {
@@ -101,6 +162,9 @@ impl PulseEngine {
             spots: None,
             last: None,
             score_history,
+            earnings: Vec::new(),
+            earnings_at: 0,
+            alerted: std::collections::HashSet::new(),
         }
     }
 
@@ -115,6 +179,19 @@ impl PulseEngine {
 
     pub fn set_fmp_key(&mut self, key: String) {
         self.settings.fmp_api_key = key;
+        save_settings(&self.config_path, &self.settings);
+    }
+
+    pub fn update_settings(&mut self, mut next: PulseSettings) {
+        if next.fmp_api_key.is_empty() {
+            next.fmp_api_key = self.settings.fmp_api_key.clone();
+        }
+        next.poll_secs = match next.poll_secs {
+            15 | 30 | 45 | 120 => next.poll_secs,
+            _ => 30,
+        };
+        next.zoom = next.zoom.min(180);
+        self.settings = next;
         save_settings(&self.config_path, &self.settings);
     }
 
@@ -167,6 +244,7 @@ impl PulseEngine {
                 .collect();
             let fetch_spots_flag = need_spots;
             let fetch_cal_flag = need_cal;
+            let fmp = self.settings.fmp_api_key.clone();
             let (spot_res, cal_res) = tokio::join!(
                 async {
                     if fetch_spots_flag {
@@ -177,7 +255,7 @@ impl PulseEngine {
                 },
                 async {
                     if fetch_cal_flag {
-                        Some(fetch_forex_factory(&client2).await)
+                        Some(fetch_calendar(&client2, &fmp).await)
                     } else {
                         None
                     }
@@ -191,18 +269,8 @@ impl PulseEngine {
             }
             if let Some(res) = cal_res {
                 match res {
-                    Ok(mut events) => {
-                        if !self.settings.fmp_api_key.is_empty() {
-                            if let Err(e) = fetch_fmp_actuals(
-                                yahoo.client(),
-                                &self.settings.fmp_api_key,
-                                &mut events,
-                            )
-                            .await
-                            {
-                                errors.push(format!("FMP: {e}"));
-                            }
-                        }
+                    Ok((events, notes)) => {
+                        errors.extend(notes);
                         let cached = CachedCal {
                             fetched_at_unix: now,
                             events,
@@ -255,6 +323,24 @@ impl PulseEngine {
         if !still.is_empty() {
             if let Err(e) = self.fetch_histories(yahoo, &still, now).await {
                 errors.push(e);
+            }
+        }
+
+        if force || now - self.earnings_at > 12 * 3600 {
+            if let Some(disk) = load_json::<Vec<EarnEvent>>(&self.cache_dir.join("earnings.json"))
+            {
+                if !force {
+                    self.earnings = disk;
+                    self.earnings_at = now;
+                }
+            }
+            if force || self.earnings.is_empty() {
+                let ev = fetch_earnings(yahoo.client(), MEGA_CAPS).await;
+                if !ev.is_empty() {
+                    self.earnings = ev;
+                    self.earnings_at = now;
+                    let _ = save_json(&self.cache_dir.join("earnings.json"), &self.earnings);
+                }
             }
         }
 
@@ -387,7 +473,7 @@ impl PulseEngine {
         let cal = self
             .calendar
             .as_ref()
-            .map(|c| strip_events(&c.events, now, 14))
+            .map(|c| c.events.clone())
             .unwrap_or_default();
 
         let fetched = spots.as_ref().map(|s| s.fetched_at_unix).unwrap_or(now);
@@ -395,6 +481,16 @@ impl PulseEngine {
             errors.extend(s.errors.iter().cloned());
         }
         let stale = quotes.is_empty() || now.saturating_sub(fetched) > crate::STALE_AFTER_SECS;
+
+        let correlations = sector_corrs(&self.history);
+        let earnings: Vec<EarnEvent> = self
+            .earnings
+            .iter()
+            .filter(|e| e.ts + 86400 >= now)
+            .cloned()
+            .collect();
+        let banners = make_banners(now, inputs.days_to_macro, &earnings);
+        let fired_alerts = self.fire_alerts(now, &scored, &cal, &earnings);
 
         PulseDashboard {
             mode: self.settings.mode,
@@ -406,8 +502,146 @@ impl PulseEngine {
             calendar: cal,
             score_history: self.score_history.clone(),
             has_fmp_key: !self.settings.fmp_api_key.is_empty(),
+            poll_secs: self.settings.poll_secs,
+            theme: self.settings.theme.clone(),
+            zoom: self.settings.zoom,
+            pre_event_alert_min: self.settings.pre_event_alert_min,
+            alert_on_release: self.settings.alert_on_release,
+            alert_on_decision: self.settings.alert_on_decision,
+            correlations,
+            earnings,
+            banners,
+            fired_alerts,
         }
     }
+
+    fn fire_alerts(
+        &mut self,
+        now: i64,
+        scored: &ScoreResult,
+        cal: &[CalEvent],
+        earnings: &[EarnEvent],
+    ) -> Vec<FiredAlert> {
+        let mut out = Vec::new();
+        if self.settings.alert_on_decision {
+            if let Some(prev) = &self.last {
+                if prev.score.decision != scored.decision {
+                    let key = format!("dec-{:?}", scored.decision);
+                    if self.alerted.insert(key) {
+                        out.push(FiredAlert {
+                            kind: "decision".into(),
+                            text: format!("Decision → {:?}", scored.decision),
+                        });
+                    }
+                }
+                if prev.score.bias.label != scored.bias.label {
+                    let key = format!("bias-{:?}", scored.bias.label);
+                    if self.alerted.insert(key) {
+                        out.push(FiredAlert {
+                            kind: "bias".into(),
+                            text: format!("Bias → {:?}", scored.bias.label),
+                        });
+                    }
+                }
+            }
+        }
+        let pre = self.settings.pre_event_alert_min as i64 * 60;
+        if pre > 0 {
+            for e in cal.iter().filter(|e| e.is_macro && e.impact.eq_ignore_ascii_case("high"))
+            {
+                let until = e.ts - now;
+                if until > 0 && until <= pre {
+                    let key = format!("pre-{}-{}", e.ts, e.title);
+                    if self.alerted.insert(key) {
+                        out.push(FiredAlert {
+                            kind: "macro".into(),
+                            text: format!("in {}m: {} {}", until / 60, e.country, e.title),
+                        });
+                    }
+                }
+            }
+        }
+        if self.settings.alert_on_release {
+            for e in cal.iter().filter(|e| !e.actual.is_empty() && e.is_macro) {
+                let key = format!("act-{}-{}", e.ts, e.title);
+                if self.alerted.insert(key) {
+                    out.push(FiredAlert {
+                        kind: "release".into(),
+                        text: format!("{} actual {}", e.title, e.actual),
+                    });
+                }
+            }
+        }
+        for e in earnings.iter().filter(|e| e.ts - now > 0 && e.ts - now < 5 * 86400) {
+            let key = format!("earn-{}", e.symbol);
+            if self.alerted.insert(key) {
+                out.push(FiredAlert {
+                    kind: "earnings".into(),
+                    text: format!("{} reports soon", e.symbol),
+                });
+            }
+        }
+        out
+    }
+}
+
+fn sector_corrs(history: &HashMap<String, CachedBars>) -> Vec<SectorCorr> {
+    let Some(spy) = history.get("SPY") else {
+        return Vec::new();
+    };
+    let spy_r = daily_returns(&closes(&spy.bars));
+    let spy_r = if spy_r.len() > 20 {
+        spy_r[spy_r.len() - 20..].to_vec()
+    } else {
+        spy_r
+    };
+    let mut out = Vec::new();
+    for (id, y) in SECTOR_SYMBOLS {
+        if let Some(h) = history.get(*y) {
+            let r = daily_returns(&closes(&h.bars));
+            let r = if r.len() > 20 {
+                r[r.len() - 20..].to_vec()
+            } else {
+                r
+            };
+            if let Some(c) = pearson(&spy_r, &r) {
+                out.push(SectorCorr {
+                    symbol: (*id).into(),
+                    corr: (c * 100.0).round() / 100.0,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn make_banners(now: i64, days_macro: Option<f64>, earnings: &[EarnEvent]) -> Vec<Banner> {
+    let mut b = Vec::new();
+    if let Some(d) = days_macro {
+        if d < 1.0 {
+            b.push(Banner {
+                level: "red".into(),
+                text: "FOMC/CPI/NFP within 24h".into(),
+            });
+        } else if d < 3.0 {
+            b.push(Banner {
+                level: "yellow".into(),
+                text: format!("FOMC/CPI/NFP in {d:.1} days"),
+            });
+        }
+    }
+    let soon: Vec<_> = earnings
+        .iter()
+        .filter(|e| e.ts >= now && e.ts - now <= 5 * 86400)
+        .map(|e| e.symbol.as_str())
+        .collect();
+    if !soon.is_empty() {
+        b.push(Banner {
+            level: "orange".into(),
+            text: format!("Earnings (5d): {}", soon.join(" ")),
+        });
+    }
+    b
 }
 
 fn build_inputs(
@@ -566,6 +800,84 @@ fn build_inputs(
         follow_through,
         close_loc,
         failed_break,
+        pcr_est: vix_c.as_ref().and_then(|c| {
+            let last = *c.last()?;
+            percentile_rank(c, last).map(|p| 0.55 + p / 100.0 * 0.70)
+        }),
+        vol_bias: match (vix_last, vix_c.as_ref().and_then(|c| slope(c, 5))) {
+            (Some(v), Some(s)) if v < 14.0 && s < 0.1 => Some("Calm".into()),
+            (_, Some(s)) if s > 0.4 => Some("Rising".into()),
+            (Some(v), _) if v > 22.0 => Some("Elevated".into()),
+            (_, Some(s)) if s < -0.4 => Some("Crushing".into()),
+            (Some(_), Some(_)) => Some("Stable".into()),
+            _ => None,
+        },
+        adv_dec: {
+            let mut up = 0;
+            let mut n = 0;
+            for s in BREADTH_SYMBOLS {
+                if let Some(h) = history.get(*s) {
+                    if let Some(v) = last_up(&h.bars) {
+                        n += 1;
+                        if v {
+                            up += 1;
+                        }
+                    }
+                }
+            }
+            if n > 0 {
+                Some(up as f64 / n as f64 * 100.0)
+            } else {
+                None
+            }
+        },
+        st_health: {
+            let p20 = if n20 > 0 {
+                Some(a20 as f64 / n20 as f64 * 100.0)
+            } else {
+                None
+            };
+            let r5 = spy_c.as_ref().and_then(|c| pct_change(c, 5));
+            match (p20, r5) {
+                (Some(p), Some(r)) if p > 60.0 && r > 0.0 => Some("Strong".into()),
+                (Some(p), Some(r)) if p < 40.0 && r < 0.0 => Some("Weak".into()),
+                (Some(_), Some(_)) => Some("Mixed".into()),
+                _ => None,
+            }
+        },
+        fed_stance: tnx_c.as_ref().and_then(|c| {
+            if c.len() <= 20 {
+                return None;
+            }
+            let d = c[c.len() - 1] - c[c.len() - 21];
+            Some(if d < -0.15 {
+                "Easing".into()
+            } else if d > 0.15 {
+                "Tightening".into()
+            } else {
+                "Hold".into()
+            })
+        }),
+        breakdowns_hold: spy.and_then(|bars| {
+            if bars.len() < 25 {
+                return None;
+            }
+            let c = closes(bars);
+            let s20 = sma(&c, 20)?;
+            let last = *c.last()?;
+            let down = spy_ret20.unwrap_or(0.0) < 0.0;
+            if !down {
+                return Some(false);
+            }
+            Some(last < s20)
+        }),
+        bounce_fail: spy.and_then(|bars| {
+            let last = bars.last()?;
+            let up_bar = last.close > last.open;
+            let loc = (last.close - last.low) / (last.high - last.low).max(1e-9);
+            let down = spy_ret20.unwrap_or(0.0) < 0.0;
+            Some(down && up_bar && loc < 0.40)
+        }),
     }
 }
 

@@ -89,6 +89,30 @@ pub fn days_to_next_macro(events: &[CalEvent], now: i64) -> Option<f64> {
         .next()
 }
 
+pub async fn fetch_calendar(
+    client: &reqwest::Client,
+    fmp_key: &str,
+) -> Result<(Vec<CalEvent>, Vec<String>), QuoteError> {
+    let mut notes = Vec::new();
+    let mut events = match fetch_forex_factory(client).await {
+        Ok(ev) => ev,
+        Err(e) => {
+            notes.push(format!("Forex Factory: {e}"));
+            if fmp_key.trim().is_empty() {
+                return Err(e);
+            }
+            notes.push("calendar via FMP fallback".into());
+            fetch_fmp_as_calendar(client, fmp_key).await?
+        }
+    };
+    if !fmp_key.trim().is_empty() {
+        if let Err(e) = fetch_fmp_actuals(client, fmp_key, &mut events).await {
+            notes.push(format!("FMP actuals: {e}"));
+        }
+    }
+    Ok((events, notes))
+}
+
 pub async fn fetch_forex_factory(client: &reqwest::Client) -> Result<Vec<CalEvent>, QuoteError> {
     let resp = client
         .get(FF_URL)
@@ -114,21 +138,62 @@ struct FmpRow {
     #[serde(default)]
     event: String,
     #[serde(default)]
+    title: String,
+    #[serde(default)]
     country: String,
     #[serde(default)]
     date: String,
     #[serde(default)]
+    impact: String,
+    #[serde(default)]
+    forecast: String,
+    #[serde(default)]
+    previous: String,
+    #[serde(default)]
     actual: Option<serde_json::Value>,
 }
 
-pub async fn fetch_fmp_actuals(
+pub async fn fetch_fmp_as_calendar(
     client: &reqwest::Client,
     api_key: &str,
-    events: &mut [CalEvent],
-) -> Result<(), QuoteError> {
-    if api_key.trim().is_empty() {
-        return Ok(());
+) -> Result<Vec<CalEvent>, QuoteError> {
+    let rows = fmp_rows(client, api_key).await?;
+    let mut out = Vec::new();
+    for r in rows {
+        let Ok(ts) = parse_event_ts(&r.date) else {
+            continue;
+        };
+        let actual = actual_to_string(&r.actual);
+        let country = if r.country.is_empty() {
+            "USD".into()
+        } else {
+            r.country
+        };
+        let title = if r.event.is_empty() { r.title } else { r.event };
+        out.push(CalEvent {
+            is_macro: is_macro_event(&title, &country),
+            title,
+            country,
+            ts,
+            impact: r.impact,
+            forecast: r.forecast,
+            previous: r.previous,
+            actual,
+        });
     }
+    out.sort_by_key(|e| e.ts);
+    Ok(out)
+}
+
+fn actual_to_string(v: &Option<serde_json::Value>) -> String {
+    match v {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+async fn fmp_rows(client: &reqwest::Client, api_key: &str) -> Result<Vec<FmpRow>, QuoteError> {
     let now = Utc::now();
     let from = (now - Duration::days(1)).format("%Y-%m-%d");
     let to = (now + Duration::days(7)).format("%Y-%m-%d");
@@ -149,8 +214,18 @@ pub async fn fetch_fmp_actuals(
         .text()
         .await
         .map_err(|e| QuoteError::Network(e.to_string()))?;
-    let rows: Vec<FmpRow> =
-        serde_json::from_str(&body).map_err(|e| QuoteError::Parse(e.to_string()))?;
+    serde_json::from_str(&body).map_err(|e| QuoteError::Parse(e.to_string()))
+}
+
+pub async fn fetch_fmp_actuals(
+    client: &reqwest::Client,
+    api_key: &str,
+    events: &mut [CalEvent],
+) -> Result<(), QuoteError> {
+    if api_key.trim().is_empty() {
+        return Ok(());
+    }
+    let rows = fmp_rows(client, api_key).await?;
     for row in rows {
         let actual = match row.actual {
             Some(serde_json::Value::String(s)) if !s.is_empty() => s,

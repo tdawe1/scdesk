@@ -29,6 +29,14 @@ If a table does not sum to 1.0 the engine renormalizes.
 | ≥ 50 | NO | QUARTER |
 | < 50 | NO | FLAT |
 
+## Extra tags (not extra weight unless listed)
+
+- **est. put/call**: `0.55 + VIX_percentile/100 × 0.70` (estimate, not CBOE).
+- **vol bias**: Calm / Stable / Rising / Elevated / Crushing from VIX level + 5d slope.
+- **Adv/Dec**: % of breadth names up today.
+- **ST health**: Strong if % > SMA20 > 60 and 5d > 0; Weak if both opposite; else Mixed.
+- **Fed stance**: 10Y 20d Δ < −0.15 Easing, > 0.15 Tightening, else Hold.
+
 ## Volatility (VIX)
 
 - **Level (50%)**: 100 inside VIX 12–20. Below 12: `100 − (12−VIX)×8`. Above 20: `100 − (VIX−20)×4`. Clamp 0–100.
