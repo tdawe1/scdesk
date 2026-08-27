@@ -11,10 +11,13 @@ use crate::bars::{
     pearson, percentile_rank, rsi, slope, sma, Bar,
 };
 use crate::calendar::{days_to_next_macro, fetch_calendar, CalEvent};
+use crate::exec::{analyze_5m, analyze_daily, leaders_extend, ExecSnapshot};
 use crate::score::{score, Mode, ScoreConfig, ScoreInputs, ScoreResult};
 use crate::yahoo::{
-    fetch_earnings, fetch_history, fetch_spots, unix_now, EarnEvent, YahooQuoteSource,
-    BREADTH_SYMBOLS, CORE_SYMBOLS, HISTORY_CACHE_SECS, MEGA_CAPS, SECTOR_SYMBOLS, SPOT_CACHE_SECS,
+    fetch_earnings, fetch_history, fetch_intraday, fetch_latest_release, fetch_spots, unix_now,
+    EarnEvent, UpdateInfo, YahooQuoteSource, BREADTH_SYMBOLS, CORE_SYMBOLS, GITHUB_REPO,
+    HISTORY_CACHE_SECS, INTRADAY_CACHE_SECS, MEGA_CAPS, OPTION_SYMBOLS, SECTOR_SYMBOLS,
+    SPOT_CACHE_SECS, UPDATE_CACHE_SECS,
 };
 use crate::{Quote, QuoteSnapshot};
 
@@ -49,6 +52,18 @@ pub struct PulseSettings {
     pub alert_on_release: bool,
     #[serde(default = "default_true")]
     pub alert_on_decision: bool,
+    #[serde(default)]
+    pub alerts_muted: bool,
+    #[serde(default = "default_true")]
+    pub cal_high: bool,
+    #[serde(default = "default_true")]
+    pub cal_med: bool,
+    #[serde(default = "default_true")]
+    pub cal_low: bool,
+    #[serde(default)]
+    pub cal_done: bool,
+    #[serde(default)]
+    pub cal_off_countries: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -66,6 +81,12 @@ impl Default for PulseSettings {
             pre_event_alert_min: 15,
             alert_on_release: false,
             alert_on_decision: true,
+            alerts_muted: false,
+            cal_high: true,
+            cal_med: true,
+            cal_low: true,
+            cal_done: false,
+            cal_off_countries: Vec::new(),
         }
     }
 }
@@ -115,6 +136,14 @@ pub struct PulseDashboard {
     pub earnings: Vec<EarnEvent>,
     pub banners: Vec<Banner>,
     pub fired_alerts: Vec<FiredAlert>,
+    pub exec: ExecSnapshot,
+    pub update: Option<UpdateInfo>,
+    pub alerts_muted: bool,
+    pub cal_high: bool,
+    pub cal_med: bool,
+    pub cal_low: bool,
+    pub cal_done: bool,
+    pub cal_off_countries: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,6 +171,9 @@ pub struct PulseEngine {
     earnings: Vec<EarnEvent>,
     earnings_at: i64,
     alerted: HashSet<String>,
+    spy_5m: Option<CachedBars>,
+    update: Option<UpdateInfo>,
+    update_at: i64,
 }
 
 impl PulseEngine {
@@ -165,6 +197,9 @@ impl PulseEngine {
             earnings: Vec::new(),
             earnings_at: 0,
             alerted: std::collections::HashSet::new(),
+            spy_5m: None,
+            update: None,
+            update_at: 0,
         }
     }
 
@@ -239,6 +274,7 @@ impl PulseEngine {
             let client2 = yahoo.client().clone();
             let tape: Vec<(String, String)> = CORE_SYMBOLS
                 .iter()
+                .chain(OPTION_SYMBOLS.iter())
                 .chain(SECTOR_SYMBOLS.iter())
                 .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
                 .collect();
@@ -323,6 +359,40 @@ impl PulseEngine {
         if !still.is_empty() {
             if let Err(e) = self.fetch_histories(yahoo, &still, now).await {
                 errors.push(e);
+            }
+        }
+
+        let need_5m = force
+            || self
+                .spy_5m
+                .as_ref()
+                .map(|c| now - c.fetched_at_unix > INTRADAY_CACHE_SECS)
+                .unwrap_or(true);
+        if need_5m {
+            match fetch_intraday(yahoo.client(), "SPY", "5m", "5d").await {
+                Ok(bars) => {
+                    self.spy_5m = Some(CachedBars {
+                        fetched_at_unix: now,
+                        bars,
+                    });
+                }
+                Err(e) => errors.push(format!("SPY 5m: {e}")),
+            }
+        }
+
+        if force || now - self.update_at > UPDATE_CACHE_SECS {
+            match fetch_latest_release(
+                yahoo.client(),
+                GITHUB_REPO,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await
+            {
+                Ok(info) => {
+                    self.update = Some(info);
+                    self.update_at = now;
+                }
+                Err(_) => self.update_at = now,
             }
         }
 
@@ -417,6 +487,7 @@ impl PulseEngine {
         let mut quotes = spots.as_ref().map(|s| s.quotes.clone()).unwrap_or_default();
         let order: Vec<&str> = CORE_SYMBOLS
             .iter()
+            .chain(OPTION_SYMBOLS.iter())
             .chain(SECTOR_SYMBOLS.iter())
             .map(|(id, _)| *id)
             .collect();
@@ -442,6 +513,14 @@ impl PulseEngine {
         let tnx = overlay("^TNX").or_else(|| overlay("TNX"));
         let dxy = overlay("DX-Y.NYB").or_else(|| overlay("DXY"));
 
+        let mut spy_5m_bars = self.spy_5m.as_ref().map(|c| c.bars.clone());
+        if let Some(ref mut bars) = spy_5m_bars {
+            if let Some(last) = spots.as_ref().and_then(|s| s.get("SPY").map(|q| q.last)) {
+                overlay_last_close(bars, last, now);
+            }
+        }
+        let exec_5m = spy_5m_bars.as_deref().map(analyze_5m).unwrap_or_default();
+
         let inputs = build_inputs(
             spy.as_deref(),
             qqq.as_deref(),
@@ -452,6 +531,7 @@ impl PulseEngine {
             spots.as_ref(),
             self.calendar.as_ref().map(|c| c.events.as_slice()),
             now,
+            exec_5m.is_live().then_some(&exec_5m),
         );
 
         if spy.is_none() {
@@ -492,6 +572,30 @@ impl PulseEngine {
         let banners = make_banners(now, inputs.days_to_macro, &earnings);
         let fired_alerts = self.fire_alerts(now, &scored, &cal, &earnings);
 
+        let mut sector_rets = Vec::new();
+        for (id, y) in SECTOR_SYMBOLS {
+            if let Some(c) = self.history.get(*y).map(|h| closes(&h.bars)) {
+                if let Some(r) = pct_change(&c, 5) {
+                    sector_rets.push(((*id).to_string(), r));
+                }
+            }
+        }
+        let leaders = leaders_extend(&sector_rets, inputs.ret5);
+        let exec = if exec_5m.is_live() {
+            exec_5m.with_leaders(leaders)
+        } else {
+            analyze_daily(
+                inputs.follow_through,
+                inputs.close_loc,
+                inputs.failed_break,
+                inputs.breakdowns_hold,
+                inputs.bounce_fail,
+                inputs.adx14,
+                inputs.close,
+            )
+            .with_leaders(leaders)
+        };
+
         PulseDashboard {
             mode: self.settings.mode,
             quotes,
@@ -512,6 +616,14 @@ impl PulseEngine {
             earnings,
             banners,
             fired_alerts,
+            exec,
+            update: self.update.clone(),
+            alerts_muted: self.settings.alerts_muted,
+            cal_high: self.settings.cal_high,
+            cal_med: self.settings.cal_med,
+            cal_low: self.settings.cal_low,
+            cal_done: self.settings.cal_done,
+            cal_off_countries: self.settings.cal_off_countries.clone(),
         }
     }
 
@@ -654,6 +766,7 @@ fn build_inputs(
     spots: Option<&QuoteSnapshot>,
     events: Option<&[CalEvent]>,
     now: i64,
+    exec_5m: Option<&ExecSnapshot>,
 ) -> ScoreInputs {
     let spy_c = spy.map(closes);
     let qqq_c = qqq.map(closes);
@@ -797,9 +910,6 @@ fn build_inputs(
         }),
         dxy_ret20: dxy_c.as_ref().and_then(|c| pct_change(c, 20)),
         days_to_macro: events.and_then(|e| days_to_next_macro(e, now)),
-        follow_through,
-        close_loc,
-        failed_break,
         pcr_est: vix_c.as_ref().and_then(|c| {
             let last = *c.last()?;
             percentile_rank(c, last).map(|p| 0.55 + p / 100.0 * 0.70)
@@ -858,26 +968,44 @@ fn build_inputs(
                 "Hold".into()
             })
         }),
-        breakdowns_hold: spy.and_then(|bars| {
-            if bars.len() < 25 {
-                return None;
-            }
-            let c = closes(bars);
-            let s20 = sma(&c, 20)?;
-            let last = *c.last()?;
-            let down = spy_ret20.unwrap_or(0.0) < 0.0;
-            if !down {
-                return Some(false);
-            }
-            Some(last < s20)
-        }),
-        bounce_fail: spy.and_then(|bars| {
-            let last = bars.last()?;
-            let up_bar = last.close > last.open;
-            let loc = (last.close - last.low) / (last.high - last.low).max(1e-9);
-            let down = spy_ret20.unwrap_or(0.0) < 0.0;
-            Some(down && up_bar && loc < 0.40)
-        }),
+        bounce_fail: exec_5m
+            .and_then(|e| e.bounce_fail)
+            .or_else(|| {
+                spy.and_then(|bars| {
+                    let last = bars.last()?;
+                    let up_bar = last.close > last.open;
+                    let loc = (last.close - last.low) / (last.high - last.low).max(1e-9);
+                    let down = spy_ret20.unwrap_or(0.0) < 0.0;
+                    Some(down && up_bar && loc < 0.40)
+                })
+            }),
+        follow_through: exec_5m
+            .and_then(|e| e.follow_through)
+            .or(follow_through),
+        close_loc: exec_5m.and_then(|e| e.close_loc).or(close_loc),
+        failed_break: exec_5m.and_then(|e| e.failed_break).or(failed_break),
+        breakdowns_hold: exec_5m
+            .and_then(|e| e.breakdowns_hold)
+            .or_else(|| {
+                spy.and_then(|bars| {
+                    if bars.len() < 25 {
+                        return None;
+                    }
+                    let c = closes(bars);
+                    let s20 = sma(&c, 20)?;
+                    let last = *c.last()?;
+                    let down = spy_ret20.unwrap_or(0.0) < 0.0;
+                    if !down {
+                        return Some(false);
+                    }
+                    Some(last < s20)
+                })
+            }),
+        skew: spots.and_then(|s| s.get("SKEW").map(|q| q.last)),
+        vvix: spots.and_then(|s| s.get("VVIX").map(|q| q.last)),
+        vix3m: spots.and_then(|s| s.get("VIX3M").map(|q| q.last)),
+        exec_source: exec_5m.map(|e| e.source.clone()),
+        vs_vwap: exec_5m.map(|e| e.vs_vwap.clone()),
     }
 }
 

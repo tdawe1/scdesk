@@ -9,7 +9,7 @@ Independent implementation. Not affiliated with Sierra Chart or SCS.
 
 ## Status
 
-Phase 1: Pulse dashboard with scoring, calendar, alerts, heatmap. Journal is still a stub (phase 2).
+Pulse v1 feature surface matches the public SCS Market Pulse checklist (independent scoring — see `docs/scoring.md` and `docs/pulse-parity.md`). Journal is still a stub (phase 2).
 
 ## Requirements
 
@@ -29,4 +29,6 @@ Pulse talks to Yahoo Finance (unofficial). Journal does not.
 
 Sierra Chart root search order: `SC_ROOT`, `~/.wine/drive_c/SierraChart`, `$WINEPREFIX/drive_c/SierraChart`, then `~/.config/scdesk/config.toml`.
 
-Keyboard in Pulse: `Ctrl+R` refresh, `T` always-on-top.
+Keyboard in Pulse: `D`/`S` mode, `Ctrl+R` refresh, `T` always-on-top, `Delete` minimize.
+
+Alerts use the desktop notification daemon (plus a short beep). Pulse checks GitHub releases for updates; it does not auto-install.

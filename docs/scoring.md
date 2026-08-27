@@ -69,11 +69,21 @@ Pillar = 0.40×SMA20 + 0.35×SMA50 + 0.25×SMA200.
 - **DXY 20d % (30%)**: `|ret| < 1.5` → 100, else `100 − (|ret|−1.5)×20` (floor 20).
 - **FOMC / CPI / NFP (40%)**: none or ≥5d → 100; ≥3d → 70; ≥1d → 40; same day → 15. USD High-impact only.
 
-## Execution (daily bars, not tape)
+## Execution (5-minute SPY window, daily fallback)
 
-- **Follow-through (50%)**: of the last 5 SPY closes, how many matched the 20d trend sign. 4–5 → 90, 3 → 70, 2 → 45, else 25.
-- **Close in range (30%)**: `(close−low)/(high−low)` on the last bar. With the trend (≥0.60 in an uptrend or ≤0.40 in a downtrend) → 80, else 50.
-- **Failed break (20%)**: last 3 bars poked a 10d high/low then closed back inside → 30, else 80.
+Prefers the last ~78 five-minute SPY bars (RTH-ish session). If Yahoo 5m is missing, daily bars are used.
+
+- **Follow-through (35%)**: 5m: last 8 bars closing with the VWAP side. Daily: last 5 closes matching 20d trend sign. 4–5 → 90, 3 → 70, 2 → 45, else 25.
+- **Close in range (20%)**: `(close−low)/(high−low)` on the last bar. With the trend (≥0.60 in an uptrend or ≤0.40 in a downtrend) → 80, else 50.
+- **Failed break (15%)**: last 3 bars poked a 10d/session high/low then closed back inside → 30, else 80.
+- **Breakdowns hold (15%)**: 5m: last 8 bars below VWAP after being above. Daily: downtrend still below SMA20. True → 80, else 40.
+- **Bounce fail (15%)**: 5m: wick through VWAP, close back below. Daily: down-day up-bar that still closes weak. True → 35, else 75.
+
+The Execution Window panel shows four **regime-adaptive** metrics (Trend vs Chop) and is not extra composite weight beyond the pillar.
+
+## Options prints (Yahoo CBOE, not equity PCR)
+
+`^CPC` / official put-call is not on Yahoo. Pulse prints **SKEW**, **VVIX**, **VIX3M** and keeps **est. put/call** from VIX percentile. Term structure is `VIX / VIX3M` (>1 = near-term fear).
 
 ## Bias (not the quality score)
 
@@ -87,10 +97,13 @@ D / W / M arrows: last close vs SMA20 / SMA50 / SMA200.
 
 | Series | Source | Cache |
 | --- | --- | --- |
-| Spot tape (SPY QQQ VIX TNX DXY + 11 sectors) | Yahoo v8 chart | 60s memory |
+| Spot tape (SPY QQQ VIX TNX DXY + SKEW/VVIX/VIX3M + 11 sectors) | Yahoo v8 chart | 60s memory |
 | 1y daily OHLC | Yahoo v8 `range=1y` | 8h disk `~/.cache/scdesk/pulse/history/` |
-| Breadth names | Yahoo | 8h disk |
+| SPY 5-minute | Yahoo v8 `interval=5m&range=5d` | 60s memory |
+| Breadth names (~51 large-caps) | Yahoo | 8h disk |
 | Calendar | `nfs.faireconomy.media/ff_calendar_thisweek.json` | 5min memory, 30min disk |
 | Actuals | FMP economic calendar (optional key) | on calendar refresh |
+| Earnings (30 mega-caps) | Yahoo quoteSummary calendarEvents | 12h disk |
+| App updates | GitHub releases `tdawe1/scdesk` | 6h memory |
 
 STALE if the tape is empty or older than 180s. Last good dashboard is kept on error.

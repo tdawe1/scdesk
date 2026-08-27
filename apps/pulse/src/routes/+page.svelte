@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
 
   type Quote = {
@@ -8,6 +9,7 @@
     last: number;
     change: number;
     change_pct: number;
+    volume?: number | null;
   };
   type Metric = { name: string; value: string; note: string };
   type Pillar = {
@@ -26,6 +28,15 @@
     previous: string;
     actual: string;
     is_macro: boolean;
+  };
+  type ExecSnap = {
+    regime: string;
+    source: string;
+    session_vwap: number | null;
+    last: number | null;
+    vs_vwap: string;
+    adx: number | null;
+    metrics: Metric[];
   };
   type Dashboard = {
     mode: string;
@@ -59,10 +70,46 @@
     earnings: { symbol: string; ts: number }[];
     banners: { level: string; text: string }[];
     fired_alerts: { kind: string; text: string }[];
+    exec: ExecSnap;
+    update?: {
+      current: string;
+      latest: string;
+      url: string;
+      notes: string;
+      newer: boolean;
+    } | null;
+    alerts_muted: boolean;
+    cal_high: boolean;
+    cal_med: boolean;
+    cal_low: boolean;
+    cal_done: boolean;
+    cal_off_countries: string[];
   };
 
   const CORE = ["SPY", "QQQ", "VIX", "TNX", "DXY"];
-  const POLL_MS = 30_000;
+  const OPTIONS = ["SKEW", "VVIX", "VIX3M"];
+  const FLAGS: Record<string, string> = {
+    USD: "🇺🇸",
+    US: "🇺🇸",
+    EUR: "🇪🇺",
+    GBP: "🇬🇧",
+    JPY: "🇯🇵",
+    CAD: "🇨🇦",
+    AUD: "🇦🇺",
+    NZD: "🇳🇿",
+    CHF: "🇨🇭",
+    CNY: "🇨🇳",
+    CNH: "🇨🇳",
+    HKD: "🇭🇰",
+    MXN: "🇲🇽",
+    BRL: "🇧🇷",
+    INR: "🇮🇳",
+    KRW: "🇰🇷",
+    SGD: "🇸🇬",
+    ZAR: "🇿🇦",
+    SEK: "🇸🇪",
+    NOK: "🇳🇴",
+  };
 
   let dash = $state<Dashboard | null>(null);
   let error = $state<string | null>(null);
@@ -77,6 +124,7 @@
   let showDone = $state(false);
   let countryOn = $state<Record<string, boolean>>({});
   let lastAlertKey = $state("");
+  let filtersReady = $state(false);
 
   const countries = $derived(
     [...new Set((dash?.calendar ?? []).map((e) => e.country))].sort(),
@@ -87,10 +135,7 @@
       if (e.impact === "Medium" && !showMed) return false;
       if (e.impact === "Low" && !showLow) return false;
       if (!showDone && e.ts < now) return false;
-      const active = Object.entries(countryOn)
-        .filter(([, v]) => v)
-        .map(([k]) => k);
-      if (active.length && !active.includes(e.country)) return false;
+      if (countryOn[e.country] === false) return false;
       return true;
     }),
   );
@@ -98,15 +143,31 @@
   const coreQuotes = $derived(
     (dash?.quotes ?? []).filter((q) => CORE.includes(q.id)),
   );
+  const optionQuotes = $derived(
+    (dash?.quotes ?? []).filter((q) => OPTIONS.includes(q.id)),
+  );
   const sectorQuotes = $derived(
     (dash?.quotes ?? [])
-      .filter((q) => !CORE.includes(q.id))
+      .filter((q) => !CORE.includes(q.id) && !OPTIONS.includes(q.id))
       .slice()
       .sort((a, b) => b.change_pct - a.change_pct),
   );
+  const tapeQuotes = $derived(dash?.quotes ?? []);
   const sectorMax = $derived(
     Math.max(0.8, ...sectorQuotes.map((q) => Math.abs(q.change_pct))),
   );
+  const ageSecs = $derived(
+    dash ? Math.max(0, now - dash.fetched_at_unix) : 0,
+  );
+  const sparkTrend = $derived.by(() => {
+    const h = dash?.score_history ?? [];
+    if (h.length < 2) return "Flat";
+    const a = h[0].composite;
+    const b = h[h.length - 1].composite;
+    if (b - a > 1) return "Up";
+    if (a - b > 1) return "Down";
+    return "Flat";
+  });
 
   function fmt(n: number, d = 2): string {
     return n.toLocaleString("en-US", {
@@ -120,6 +181,13 @@
   function fmtPct(n: number): string {
     return `${n > 0 ? "+" : ""}${fmt(n)}%`;
   }
+  function fmtVol(n?: number | null): string {
+    if (n == null || !Number.isFinite(n)) return "";
+    if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`;
+    return String(Math.round(n));
+  }
   function cls(n: number): string {
     if (n > 0) return "up";
     if (n < 0) return "down";
@@ -130,13 +198,19 @@
     if (a === "Down") return "▼";
     return "■";
   }
+  function flag(c: string): string {
+    return FLAGS[c] ?? c;
+  }
   function countdown(ts: number): string {
     const s = ts - now;
     if (s <= 0) return "now";
-    const h = Math.floor(s / 3600);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
     const m = Math.floor((s % 3600) / 60);
     const sec = s % 60;
-    if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+    if (d > 0) return `${d}d ${h}h ${String(m).padStart(2, "0")}m`;
+    if (h > 0)
+      return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
     return `${m}m ${String(sec).padStart(2, "0")}s`;
   }
   function spark(hist: { composite: number }[]): string {
@@ -157,6 +231,13 @@
   function sectorWidth(pct: number): string {
     return `${(Math.abs(pct) / sectorMax) * 50}%`;
   }
+  function earnWhen(ts: number): string {
+    const d = new Date(ts * 1000);
+    return d.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    });
+  }
 
   async function refresh(force = false) {
     if (loading && !force) return;
@@ -165,6 +246,16 @@
       const next = await invoke<Dashboard>("get_dashboard", { force });
       dash = next;
       error = next.errors.length ? next.errors.slice(0, 3).join(" · ") : null;
+      if (!filtersReady) {
+        showHigh = next.cal_high;
+        showMed = next.cal_med;
+        showLow = next.cal_low;
+        showDone = next.cal_done;
+        countryOn = Object.fromEntries(
+          (next.cal_off_countries ?? []).map((c) => [c, false]),
+        );
+        filtersReady = true;
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -239,19 +330,9 @@
     o.stop(ctx.currentTime + 0.12);
   }
 
-  function toast(text: string) {
-    beep();
-    if (typeof Notification !== "undefined") {
-      if (Notification.permission === "granted") {
-        new Notification("scdesk Pulse", { body: text });
-      } else if (Notification.permission !== "denied") {
-        void Notification.requestPermission();
-      }
-    }
-  }
-
   async function persist(partial: Record<string, unknown>) {
     if (!dash) return;
+    const off = countries.filter((c) => countryOn[c] === false);
     const settings = {
       mode: dash.mode,
       fmp_api_key: fmpDraft,
@@ -261,6 +342,12 @@
       pre_event_alert_min: dash.pre_event_alert_min,
       alert_on_release: dash.alert_on_release,
       alert_on_decision: dash.alert_on_decision,
+      alerts_muted: dash.alerts_muted,
+      cal_high: showHigh,
+      cal_med: showMed,
+      cal_low: showLow,
+      cal_done: showDone,
+      cal_off_countries: off,
       ...partial,
     };
     try {
@@ -273,24 +360,39 @@
   function fitZoom() {
     const z = Math.max(
       100,
-      Math.min(180, Math.floor(Math.min(window.innerWidth / 1280, window.innerHeight / 860) * 100)),
+      Math.min(
+        180,
+        Math.floor(
+          Math.min(window.innerWidth / 1280, window.innerHeight / 860) * 100,
+        ),
+      ),
     );
     void persist({ zoom: z });
+  }
+
+  function toggleCountry(c: string) {
+    const nextOn = countryOn[c] === false;
+    countryOn = { ...countryOn, [c]: nextOn };
+    const cal_off_countries = countries.filter((x) => countryOn[x] === false);
+    void persist({ cal_off_countries });
   }
 
   $effect(() => {
     const theme = dash?.theme ?? "dark";
     document.documentElement.dataset.theme = theme;
-    document.documentElement.style.setProperty("--zoom", String((dash?.zoom ?? 100) / 100));
+    document.documentElement.style.setProperty(
+      "--zoom",
+      String((dash?.zoom ?? 100) / 100),
+    );
   });
 
   $effect(() => {
     const alerts = dash?.fired_alerts ?? [];
-    if (!alerts.length) return;
+    if (!alerts.length || dash?.alerts_muted) return;
     const key = alerts.map((a) => a.text).join("|");
     if (key === lastAlertKey) return;
     lastAlertKey = key;
-    for (const a of alerts) toast(a.text);
+    beep();
   });
 
   onMount(() => {
@@ -322,6 +424,7 @@
     <div class="status" class:stale={dash?.stale !== false} class:live={dash && !dash.stale}>
       <span class="dot"></span>
       {dash && !dash.stale ? "LIVE" : "STALE"}
+      <span class="ago">{ageSecs}s ago</span>
     </div>
     <div class="clock">
       {dash ? new Date(dash.fetched_at_unix * 1000).toLocaleTimeString() : "—"}
@@ -357,15 +460,55 @@
       type="button"
       onclick={() => persist({ theme: dash?.theme === "light" ? "dark" : "light" })}
     >{dash?.theme === "light" ? "dark" : "light"}</button>
+    <button
+      type="button"
+      class:on={!dash?.alerts_muted}
+      onclick={() => persist({ alerts_muted: !dash?.alerts_muted })}
+    >{dash?.alerts_muted ? "alerts off" : "alerts"}</button>
     <button type="button" onclick={() => refresh(true)}>refresh</button>
     <button type="button" class:on={pinned} onclick={togglePin}>{pinned ? "pinned" : "pin"}</button>
     <button type="button" onclick={() => (settingsOpen = true)}>settings</button>
   </header>
 
+  {#if tapeQuotes.length}
+    <div class="tape" title="spot tape">
+      <div class="tape-track">
+        {#each [...tapeQuotes, ...tapeQuotes] as q, i (q.id + i)}
+          <span class="tick {cls(q.change)}">
+            <b>{q.id}</b>
+            {fmt(q.last)}
+            {fmtPct(q.change_pct)}
+            {#if q.volume}
+              <i>{fmtVol(q.volume)}</i>
+            {/if}
+          </span>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
+  {#if dash?.update?.newer}
+    <div class="banner orange">
+      update {dash.update.latest} available (you have {dash.update.current})
+      <button
+        type="button"
+        onclick={() => dash?.update?.url && openUrl(dash.update.url)}
+      >open release</button>
+    </div>
+  {/if}
+
   {#if dash?.banners?.length}
     <div class="banners">
       {#each dash.banners as b}
         <div class="banner {b.level}">{b.text}</div>
+      {/each}
+    </div>
+  {/if}
+
+  {#if dash?.fired_alerts?.length && !dash.alerts_muted}
+    <div class="banners">
+      {#each dash.fired_alerts as a}
+        <div class="banner yellow">{a.text}</div>
       {/each}
     </div>
   {/if}
@@ -378,12 +521,30 @@
           <div class="sym">{q.id}</div>
           <div class="last">{fmt(q.last)}</div>
           <div class="chg">{fmtChg(q.change)} · {fmtPct(q.change_pct)}</div>
+          {#if q.volume}
+            <div class="k">vol {fmtVol(q.volume)}</div>
+          {/if}
         </article>
       {:else}
         <div class="empty">waiting for quotes…</div>
       {/each}
     </div>
   </section>
+
+  {#if optionQuotes.length}
+    <section class="block">
+      <h2>Options prints <span>Yahoo CBOE (not equity PCR)</span></h2>
+      <div class="indexes">
+        {#each optionQuotes as q (q.id)}
+          <article class={cls(q.change)}>
+            <div class="sym">{q.id}</div>
+            <div class="last">{fmt(q.last)}</div>
+            <div class="chg">{fmtChg(q.change)} · {fmtPct(q.change_pct)}</div>
+          </article>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   {#if dash}
     {@const s = dash.score}
@@ -401,8 +562,13 @@
           >
             <div class="gauge-inner">
               <strong>{fmt(s.composite, 1)}</strong>
-              <span>quality</span>
+              <span>quality {arrow(sparkTrend)}</span>
             </div>
+          </div>
+          <div class="minip">
+            {#each s.pillars as p}
+              <span title={p.name}>{p.name.slice(0, 3)} {fmt(p.score, 0)}</span>
+            {/each}
           </div>
         </article>
         <article class="hero-card">
@@ -420,7 +586,7 @@
           <div class="size-val">{s.size}</div>
         </article>
         <article class="hero-card spark-card">
-          <div class="k">6h quality</div>
+          <div class="k">6h quality {arrow(sparkTrend)}</div>
           {#if dash.score_history.length > 1}
             <svg viewBox="0 0 220 48" preserveAspectRatio="none">
               <polyline
@@ -434,19 +600,6 @@
             <div class="k">building…</div>
           {/if}
         </article>
-      </div>
-    </section>
-
-    <section class="block">
-      <h2>Weights</h2>
-      <div class="weights">
-        {#each s.pillars as p}
-          <div class="wcol">
-            <i style="height: {Math.round(p.weight * 100)}%"></i>
-            <span>{p.name.slice(0, 3)}</span>
-            <b>{Math.round(p.weight * 100)}%</b>
-          </div>
-        {/each}
       </div>
     </section>
 
@@ -493,22 +646,83 @@
     </section>
   {/if}
 
-  {#if sectorQuotes.length}
-    <section class="block">
-      <h2>Sectors <span>day change</span></h2>
-      <div class="sectors">
-        {#each sectorQuotes as q (q.id)}
-          <div class="srow {cls(q.change)}">
-            <div class="sid">{q.id}</div>
-            <div class="sbar">
-              <span class="mid"></span>
-              {#if q.change_pct >= 0}
-                <i class="pos" style="width: {sectorWidth(q.change_pct)}; left: 50%"></i>
-              {:else}
-                <i class="neg" style="width: {sectorWidth(q.change_pct)}; right: 50%"></i>
-              {/if}
+  <div class="bottom-row">
+    {#if dash?.exec}
+      <section class="block">
+        <h2>
+          Execution window
+          <span>{dash.exec.regime} · {dash.exec.source}</span>
+        </h2>
+        <div class="exec">
+          <div class="k">
+            {#if dash.exec.last != null}last {fmt(dash.exec.last)}{/if}
+            {#if dash.exec.session_vwap != null}
+              · VWAP {fmt(dash.exec.session_vwap)}{/if}
+            {#if dash.exec.adx != null} · ADX {fmt(dash.exec.adx, 1)}{/if}
+          </div>
+          <div class="exec-grid">
+            {#each dash.exec.metrics as m}
+              <article title={m.note}>
+                <div class="k">{m.name}</div>
+                <div class="exec-val">{m.value}</div>
+              </article>
+            {/each}
+          </div>
+        </div>
+      </section>
+    {/if}
+
+    {#if sectorQuotes.length}
+      <section class="block">
+        <h2>Sectors <span>day change</span></h2>
+        <div class="sectors">
+          {#each sectorQuotes as q (q.id)}
+            <div class="srow {cls(q.change)}">
+              <div class="sid">{q.id}</div>
+              <div class="sbar">
+                <span class="mid"></span>
+                {#if q.change_pct >= 0}
+                  <i class="pos" style="width: {sectorWidth(q.change_pct)}; left: 50%"></i>
+                {:else}
+                  <i class="neg" style="width: {sectorWidth(q.change_pct)}; right: 50%"></i>
+                {/if}
+              </div>
+              <div class="spct">{fmtPct(q.change_pct)}</div>
             </div>
-            <div class="spct">{fmtPct(q.change_pct)}</div>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if dash}
+      {@const s = dash.score}
+      <section class="block">
+        <h2>Weights</h2>
+        <div class="weights">
+          {#each s.pillars as p}
+            <div class="wcol">
+              <i style="height: {Math.round(p.weight * 100)}%"></i>
+              <span>{p.name.slice(0, 3)}</span>
+              <b>{Math.round(p.weight * 100)}%</b>
+            </div>
+          {/each}
+        </div>
+        <div class="biasbar" title="directional bias">
+          <span style="left: {50 + s.bias.score / 2}%">{s.bias.label}</span>
+        </div>
+      </section>
+    {/if}
+  </div>
+
+  {#if dash?.earnings?.length}
+    <section class="block">
+      <h2>Earnings <span>mega-caps, next 30</span></h2>
+      <div class="cal">
+        {#each dash.earnings as e}
+          <div class="ev" class:soon={e.ts - now < 5 * 86400 && e.ts >= now}>
+            <div class="when">{earnWhen(e.ts)}</div>
+            <div class="ttl">{e.symbol}</div>
+            <div class="nums">{countdown(e.ts)}</div>
           </div>
         {/each}
       </div>
@@ -516,17 +730,20 @@
   {/if}
 
   <section class="block cal-block">
-    <h2>Calendar <span>this week</span></h2>
+    <h2>
+      Calendar <span>this week</span>
+      {#if dash?.has_fmp_key}<span class="badge">FMP</span>{/if}
+    </h2>
     <div class="chips">
-      <button class:on={showHigh} onclick={() => (showHigh = !showHigh)}>High</button>
-      <button class:on={showMed} onclick={() => (showMed = !showMed)}>Medium</button>
-      <button class:on={showLow} onclick={() => (showLow = !showLow)}>Low</button>
-      <button class:on={showDone} onclick={() => (showDone = !showDone)}>Done</button>
+      <button class:on={showHigh} onclick={() => { showHigh = !showHigh; void persist({ cal_high: showHigh }); }}>High</button>
+      <button class:on={showMed} onclick={() => { showMed = !showMed; void persist({ cal_med: showMed }); }}>Medium</button>
+      <button class:on={showLow} onclick={() => { showLow = !showLow; void persist({ cal_low: showLow }); }}>Low</button>
+      <button class:on={showDone} onclick={() => { showDone = !showDone; void persist({ cal_done: showDone }); }}>Done</button>
       {#each countries as c}
         <button
           class:on={countryOn[c] !== false}
-          onclick={() => (countryOn = { ...countryOn, [c]: countryOn[c] === false })}
-        >{c}</button>
+          onclick={() => toggleCountry(c)}
+        >{flag(c)} {c}</button>
       {/each}
     </div>
     <div class="cal">
@@ -540,8 +757,9 @@
             class:imminent={e.ts - now < 300 && e.ts >= now}
           >
             <div class="when">{countdown(e.ts)}</div>
-            <div class="ttl">{e.country} · {e.title}</div>
+            <div class="ttl">{flag(e.country)} {e.country} · {e.title}</div>
             <div class="nums">
+              <i class="idot {e.impact.toLowerCase()}"></i>
               {e.impact}
               {#if e.forecast} · F {e.forecast}{/if}
               {#if e.previous} · P {e.previous}{/if}
@@ -568,6 +786,10 @@
         placeholder={dash?.has_fmp_key ? "key saved — paste to replace" : "FMP API key"}
         bind:value={fmpDraft}
       />
+      <button
+        type="button"
+        onclick={() => openUrl("https://site.financialmodelingprep.com/register")}
+      >get a free FMP key</button>
       <label class="k">pre-event alert
         <select
           value={String(dash?.pre_event_alert_min ?? 15)}
@@ -575,6 +797,7 @@
         >
           <option value="0">off</option>
           <option value="5">5m</option>
+          <option value="10">10m</option>
           <option value="15">15m</option>
           <option value="30">30m</option>
           <option value="60">60m</option>
@@ -653,6 +876,11 @@
   .status.stale {
     color: var(--stale);
   }
+  .ago {
+    font-weight: 400;
+    color: var(--muted);
+    font-size: 11px;
+  }
   .clock,
   .k,
   .err {
@@ -684,6 +912,45 @@
     color: var(--live);
   }
 
+  .tape {
+    overflow: hidden;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 0;
+  }
+  .tape-track {
+    display: inline-flex;
+    gap: 22px;
+    padding-left: 16px;
+    animation: marquee 48s linear infinite;
+    white-space: nowrap;
+  }
+  .tape:hover .tape-track {
+    animation-play-state: paused;
+  }
+  .tick {
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .tick b {
+    margin-right: 6px;
+    color: var(--muted);
+  }
+  .tick i {
+    font-style: normal;
+    color: var(--muted);
+    margin-left: 6px;
+  }
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+
   .block h2 {
     margin: 0 0 10px;
     font-size: 11px;
@@ -696,6 +963,15 @@
     font-weight: 400;
     margin-left: 8px;
     opacity: 0.7;
+  }
+  .badge {
+    display: inline-block;
+    border: 1px solid var(--live);
+    color: var(--live);
+    border-radius: 3px;
+    padding: 0 5px;
+    font-size: 10px;
+    letter-spacing: 0.08em;
   }
 
   .indexes {
@@ -724,12 +1000,14 @@
   }
   .up .last,
   .up .chg,
-  .up .spct {
+  .up .spct,
+  .tick.up {
     color: var(--up);
   }
   .down .last,
   .down .chg,
-  .down .spct {
+  .down .spct,
+  .tick.down {
     color: var(--down);
   }
   .empty {
@@ -791,6 +1069,14 @@
   }
   .gauge-inner strong {
     font-size: 20px;
+  }
+  .minip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    font-size: 10px;
+    color: var(--muted);
+    justify-content: center;
   }
   .bias-lab {
     font-size: clamp(22px, 3vw, 30px);
@@ -872,6 +1158,37 @@
     margin: 0;
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+
+  .bottom-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+    align-items: start;
+  }
+  .exec {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .exec-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .exec-grid article {
+    background: var(--panel-2);
+    border-radius: 6px;
+    padding: 10px;
+  }
+  .exec-val {
+    font-size: 18px;
+    font-weight: 700;
+    margin-top: 4px;
   }
 
   .sectors {
@@ -963,6 +1280,23 @@
     color: var(--muted);
     font-size: 11px;
   }
+  .idot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 99px;
+    margin-right: 4px;
+    background: var(--muted);
+  }
+  .idot.high {
+    background: var(--down);
+  }
+  .idot.medium {
+    background: #f0a050;
+  }
+  .idot.low {
+    background: var(--stale);
+  }
 
   .modal {
     position: fixed;
@@ -1012,6 +1346,10 @@
     padding: 8px 12px;
     font-weight: 700;
     border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
   }
   .banner.red {
     background: #3a1515;
@@ -1048,6 +1386,24 @@
     background: var(--live);
     border-radius: 3px 3px 0 0;
     min-height: 4px;
+  }
+  .biasbar {
+    position: relative;
+    height: 18px;
+    margin-top: 8px;
+    background: linear-gradient(90deg, var(--down), var(--panel) 50%, var(--up));
+    border-radius: 9px;
+    border: 1px solid var(--border);
+  }
+  .biasbar span {
+    position: absolute;
+    top: -2px;
+    transform: translateX(-50%);
+    font-size: 10px;
+    font-weight: 700;
+    background: var(--bg);
+    padding: 0 4px;
+    border-radius: 3px;
   }
   .heat {
     display: grid;

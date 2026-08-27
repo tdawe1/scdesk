@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use pulse_core::{Mode, PulseDashboard, PulseEngine, PulseSettings, ScoreConfig, YahooQuoteSource};
+use tauri::AppHandle;
+use tauri_plugin_notification::NotificationExt;
 
 struct AppState {
     yahoo: YahooQuoteSource,
@@ -19,14 +21,32 @@ fn config_path() -> PathBuf {
         .join("scdesk/pulse.toml")
 }
 
+fn notify_alerts(app: &AppHandle, dash: &PulseDashboard) {
+    if dash.alerts_muted {
+        return;
+    }
+    for a in &dash.fired_alerts {
+        let _ = app
+            .notification()
+            .builder()
+            .title("scdesk Pulse")
+            .body(&a.text)
+            .show();
+    }
+}
+
 #[tauri::command]
 async fn get_dashboard(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     force: bool,
 ) -> Result<PulseDashboard, String> {
     let mut eng = state.engine.lock().await;
     match eng.refresh(&state.yahoo, force).await {
-        Ok(d) => Ok(d),
+        Ok(d) => {
+            notify_alerts(&app, &d);
+            Ok(d)
+        }
         Err(e) => {
             if let Some(last) = eng.last().cloned() {
                 let mut d = last;
@@ -42,12 +62,15 @@ async fn get_dashboard(
 
 #[tauri::command]
 async fn set_mode(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     mode: String,
 ) -> Result<PulseDashboard, String> {
     let mut eng = state.engine.lock().await;
     eng.set_mode(Mode::parse(&mode));
-    eng.refresh(&state.yahoo, false).await
+    let d = eng.refresh(&state.yahoo, false).await?;
+    notify_alerts(&app, &d);
+    Ok(d)
 }
 
 #[tauri::command]
@@ -67,12 +90,15 @@ async fn set_fmp_key(state: tauri::State<'_, AppState>, key: String) -> Result<(
 
 #[tauri::command]
 async fn save_settings(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     settings: PulseSettings,
 ) -> Result<PulseDashboard, String> {
     let mut eng = state.engine.lock().await;
     eng.update_settings(settings);
-    eng.refresh(&state.yahoo, false).await
+    let d = eng.refresh(&state.yahoo, false).await?;
+    notify_alerts(&app, &d);
+    Ok(d)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -81,6 +107,7 @@ pub fn run() {
     let engine = PulseEngine::open(cache_dir(), config_path(), ScoreConfig::default());
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             yahoo,
             engine: tokio::sync::Mutex::new(engine),

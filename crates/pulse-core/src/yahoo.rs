@@ -11,6 +11,9 @@ use crate::bars::Bar;
 pub const STALE_AFTER_SECS: i64 = 180;
 pub const SPOT_CACHE_SECS: i64 = 60;
 pub const HISTORY_CACHE_SECS: i64 = 8 * 3600;
+pub const INTRADAY_CACHE_SECS: i64 = 60;
+pub const UPDATE_CACHE_SECS: i64 = 6 * 3600;
+pub const GITHUB_REPO: &str = "tdawe1/scdesk";
 
 pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
@@ -21,6 +24,13 @@ pub const CORE_SYMBOLS: &[(&str, &str)] = &[
     ("VIX", "^VIX"),
     ("TNX", "^TNX"),
     ("DXY", "DX-Y.NYB"),
+];
+
+/// CBOE options prints available on Yahoo (not the equity PCR series).
+pub const OPTION_SYMBOLS: &[(&str, &str)] = &[
+    ("SKEW", "^SKEW"),
+    ("VVIX", "^VVIX"),
+    ("VIX3M", "^VIX3M"),
 ];
 
 pub const SECTOR_SYMBOLS: &[(&str, &str)] = &[
@@ -42,7 +52,7 @@ pub const BREADTH_SYMBOLS: &[&str] = &[
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "AVGO", "TSLA", "JPM", "BRK-B", "V", "MA",
     "UNH", "XOM", "HD", "COST", "PG", "KO", "PEP", "LIN", "CAT", "HON", "UNP", "NEE", "AMT", "DIS",
     "NFLX", "CVX", "WMT", "ORCL", "AMD", "CRM", "CSCO", "ABBV", "MRK", "JNJ", "LLY", "PFE", "BAC",
-    "WFC", "GS", "NKE", "PM", "INTC", "QCOM", "TXN", "GE", "RTX", "BA", "SPGI",
+    "WFC", "GS", "NKE", "PM", "INTC", "QCOM", "TXN", "GE", "RTX", "BA", "SPGI", "AMGN",
 ];
 
 pub const MEGA_CAPS: &[&str] = &[
@@ -65,6 +75,8 @@ pub struct Quote {
     pub change: f64,
     pub change_pct: f64,
     pub as_of_unix: i64,
+    #[serde(default)]
+    pub volume: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -221,6 +233,8 @@ struct ChartMeta {
     previous_close: Option<f64>,
     #[serde(rename = "regularMarketTime")]
     regular_market_time: Option<i64>,
+    #[serde(rename = "regularMarketVolume")]
+    regular_market_volume: Option<f64>,
 }
 
 pub fn parse_chart_json(id: &str, yahoo: &str, body: &str) -> Result<Quote, QuoteError> {
@@ -231,12 +245,12 @@ pub fn parse_chart_json(id: &str, yahoo: &str, body: &str) -> Result<Quote, Quot
             return Err(QuoteError::Parse(err.to_string()));
         }
     }
-    let meta = parsed
+    let result = parsed
         .chart
         .result
         .and_then(|mut r| r.pop())
-        .map(|r| r.meta)
         .ok_or_else(|| QuoteError::Parse("empty chart result".into()))?;
+    let meta = result.meta;
     let last = meta
         .regular_market_price
         .ok_or_else(|| QuoteError::Parse("missing regularMarketPrice".into()))?;
@@ -250,6 +264,12 @@ pub fn parse_chart_json(id: &str, yahoo: &str, body: &str) -> Result<Quote, Quot
     } else {
         0.0
     };
+    let bar_vol = result.indicators.and_then(|i| {
+        i.quote.and_then(|mut v| v.pop()).and_then(|q| {
+            q.volume
+                .and_then(|vols| vols.into_iter().rev().find_map(|x| x))
+        })
+    });
     Ok(Quote {
         id: id.to_string(),
         yahoo_symbol: if meta.symbol.is_empty() {
@@ -261,6 +281,7 @@ pub fn parse_chart_json(id: &str, yahoo: &str, body: &str) -> Result<Quote, Quot
         change,
         change_pct,
         as_of_unix: meta.regular_market_time.unwrap_or_else(unix_now),
+        volume: meta.regular_market_volume.or(bar_vol),
     })
 }
 
@@ -358,8 +379,26 @@ pub async fn fetch_earnings(
 }
 
 pub async fn fetch_history(client: &reqwest::Client, yahoo: &str) -> Result<Vec<Bar>, QuoteError> {
+    fetch_chart(client, yahoo, "1d", "1y").await
+}
+
+pub async fn fetch_intraday(
+    client: &reqwest::Client,
+    yahoo: &str,
+    interval: &str,
+    range: &str,
+) -> Result<Vec<Bar>, QuoteError> {
+    fetch_chart(client, yahoo, interval, range).await
+}
+
+async fn fetch_chart(
+    client: &reqwest::Client,
+    yahoo: &str,
+    interval: &str,
+    range: &str,
+) -> Result<Vec<Bar>, QuoteError> {
     let url = format!(
-        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1y",
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval={interval}&range={range}",
         urlencoding_lite(yahoo)
     );
     let body = get_text(client, &url).await?;
@@ -391,6 +430,63 @@ pub fn urlencoding_lite(s: &str) -> String {
     out
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateInfo {
+    pub current: String,
+    pub latest: String,
+    pub url: String,
+    pub notes: String,
+    pub newer: bool,
+}
+
+#[derive(Deserialize)]
+struct GhRelease {
+    tag_name: String,
+    html_url: String,
+    body: Option<String>,
+}
+
+pub fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let t = s.trim().trim_start_matches('v');
+    let mut parts = t.split('.');
+    let maj = parts.next()?.parse().ok()?;
+    let min = parts.next().unwrap_or("0").parse().ok()?;
+    let pat = parts
+        .next()
+        .unwrap_or("0")
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((maj, min, pat))
+}
+
+pub fn is_newer(latest: &str, current: &str) -> bool {
+    match (parse_semver(latest), parse_semver(current)) {
+        (Some(a), Some(b)) => a > b,
+        _ => latest.trim_start_matches('v') != current.trim_start_matches('v') && !latest.is_empty(),
+    }
+}
+
+pub async fn fetch_latest_release(
+    client: &reqwest::Client,
+    repo: &str,
+    current: &str,
+) -> Result<UpdateInfo, QuoteError> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let body = get_text(client, &url).await?;
+    let rel: GhRelease = serde_json::from_str(&body).map_err(|e| QuoteError::Parse(e.to_string()))?;
+    let latest = rel.tag_name;
+    Ok(UpdateInfo {
+        newer: is_newer(&latest, current),
+        current: current.to_string(),
+        latest,
+        url: rel.html_url,
+        notes: rel.body.unwrap_or_default(),
+    })
+}
+
 pub fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -409,7 +505,8 @@ mod tests {
             "symbol": "SPY",
             "regularMarketPrice": 563.4,
             "chartPreviousClose": 560.1,
-            "regularMarketTime": 1700000000
+            "regularMarketTime": 1700000000,
+            "regularMarketVolume": 123456789
           }
         }],
         "error": null
@@ -441,6 +538,7 @@ mod tests {
         assert_eq!(q.last, 563.4);
         assert!((q.change - 3.3).abs() < 1e-9);
         assert_eq!(q.as_of_unix, 1700000000);
+        assert_eq!(q.volume, Some(123456789.0));
     }
 
     #[test]
@@ -449,6 +547,12 @@ mod tests {
         assert_eq!(bars.len(), 3);
         assert_eq!(bars[2].close, 3.1);
         assert_eq!(bars[2].open, 3.1);
+    }
+
+    #[test]
+    fn breadth_basket_is_51() {
+        assert_eq!(BREADTH_SYMBOLS.len(), 51);
+        assert_eq!(OPTION_SYMBOLS.len(), 3);
     }
 
     #[test]
@@ -462,6 +566,13 @@ mod tests {
     }
 
     #[test]
+    fn semver_newer() {
+        assert!(is_newer("0.2.0", "0.1.0"));
+        assert!(!is_newer("v0.1.0", "0.1.0"));
+        assert!(is_newer("v1.0.0", "0.9.9"));
+    }
+
+    #[test]
     fn fresh_quotes_not_stale() {
         let now = 1_700_000_000;
         let snap = QuoteSnapshot {
@@ -472,6 +583,7 @@ mod tests {
                 change: 0.0,
                 change_pct: 0.0,
                 as_of_unix: now,
+                volume: Some(1_000.0),
             }],
             fetched_at_unix: now,
             errors: vec![],

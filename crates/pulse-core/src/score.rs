@@ -238,6 +238,11 @@ pub struct ScoreInputs {
     pub fed_stance: Option<String>,
     pub breakdowns_hold: Option<bool>,
     pub bounce_fail: Option<bool>,
+    pub skew: Option<f64>,
+    pub vvix: Option<f64>,
+    pub vix3m: Option<f64>,
+    pub exec_source: Option<String>,
+    pub vs_vwap: Option<String>,
 }
 
 pub fn score(inputs: &ScoreInputs, cfg: &ScoreConfig, mode: Mode) -> ScoreResult {
@@ -358,6 +363,16 @@ fn volatility(i: &ScoreInputs) -> (f64, Vec<Metric>) {
             "vol bias",
             i.vol_bias.clone().unwrap_or_else(|| "n/a".into()),
             "level + slope",
+        ),
+        metric("SKEW", fmt_opt(i.skew, 1), "CBOE tail, Yahoo ^SKEW"),
+        metric("VVIX", fmt_opt(i.vvix, 1), "vol-of-vol, Yahoo ^VVIX"),
+        metric(
+            "VIX/VIX3M",
+            match (i.vix, i.vix3m) {
+                (Some(v), Some(m)) if m.abs() > 1e-9 => format!("{:.2}", v / m),
+                _ => "n/a".into(),
+            },
+            ">1 near-term fear (backwardation)",
         ),
     ];
     (score, metrics)
@@ -581,23 +596,37 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
         metric(
             "follow-through",
             fmt_opt(i.follow_through, 0),
-            "closes with 20d trend / 5",
+            if i.exec_source.as_deref() == Some("5m") {
+                "5m closes with VWAP side"
+            } else {
+                "daily closes with 20d trend / 5"
+            },
         ),
         metric("close in range", fmt_opt(i.close_loc, 2), "0=low 1=high"),
         metric(
             "failed break",
             yn(i.failed_break),
-            "10d high/low then reverse",
+            "poke high/low then reverse",
         ),
         metric(
             "breakdowns hold",
             yn(i.breakdowns_hold),
-            "downtrend closes still below SMA20",
+            "lost VWAP/SMA and stayed below",
         ),
         metric(
             "bounce fail",
             yn(i.bounce_fail),
-            "up-bar still closes weak",
+            "wick through, close back",
+        ),
+        metric(
+            "vs VWAP",
+            i.vs_vwap.clone().unwrap_or_else(|| "n/a".into()),
+            "session VWAP from 5m",
+        ),
+        metric(
+            "exec source",
+            i.exec_source.clone().unwrap_or_else(|| "n/a".into()),
+            "5m preferred, daily fallback",
         ),
     ];
     (score, metrics)
