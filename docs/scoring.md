@@ -6,84 +6,86 @@ Missing inputs score **50** (neutral), so a Yahoo blip never zeros the dashboard
 
 ## Weights
 
+Five quality pillars, then a 10% execution overlay:
+
+`composite = 0.90 × (Σ pillar × DAY/SWING weight) + 0.10 × execution`
+
 | Pillar | DAY | SWING |
 | --- | ---: | ---: |
-| Volatility | 0.25 | 0.15 |
-| Momentum | 0.20 | 0.20 |
-| Trend | 0.20 | 0.25 |
+| Volatility | 0.30 | 0.25 |
+| Momentum | 0.30 | 0.25 |
+| Trend | 0.15 | 0.20 |
 | Breadth | 0.15 | 0.20 |
-| Macro | 0.10 | 0.15 |
-| Execution | 0.10 | 0.05 |
+| Macro | 0.10 | 0.10 |
+| Execution overlay | 0.10 | 0.10 |
 
-If a table does not sum to 1.0 the engine renormalizes.
+If a DAY/SWING table does not sum to 1.0 the engine renormalizes the five pillars. Overlay stays at 0.10 unless `[overlay] execution` is changed.
 
-`composite = Σ pillar_score × weight`, clamped 0–100, rounded to 1 decimal.
+Displayed pillar weights on the dashboard are the **effective** composite weights (DAY/SWING × 0.90, execution 0.10).
 
 ## Decision and size
 
-| Composite | Decision | Size |
-| --- | --- | --- |
-| ≥ 80 | YES | FULL |
-| ≥ 70 | CAUTION | 3/4 |
-| ≥ 60 | CAUTION | HALF |
-| ≥ 50 | NO | QUARTER |
-| < 50 | NO | FLAT |
+| Composite | Bias | Decision | Size |
+| --- | --- | --- | --- |
+| ≥ 80 | LONG or SHORT | YES | FULL |
+| ≥ 80 | NEUTRAL | CAUTION | FULL |
+| ≥ 70 | any | CAUTION | 3/4 |
+| ≥ 60 | any | CAUTION | HALF |
+| ≥ 50 | any | NO | QUARTER |
+| < 50 | any | NO | FLAT |
+
+YES requires a side. High quality with NEUTRAL bias is CAUTION.
 
 ## Extra tags (not extra weight unless listed)
 
-- **est. put/call**: `0.55 + VIX_percentile/100 × 0.70` (estimate, not CBOE).
-- **vol bias**: Calm / Stable / Rising / Elevated / Crushing from VIX level + 5d slope.
+- **est. put/call**: piecewise from VIX level (not CBOE). Display on vol; **10% of momentum**.
+- **vol bias**: Calm / Stable / Rising / Elevated / Crushing from VIX level + 5-session Δ.
 - **Adv/Dec**: % of breadth names up today.
 - **ST health**: Strong if % > SMA20 > 60 and 5d > 0; Weak if both opposite; else Mixed.
 - **Fed stance**: 10Y 20d Δ < −0.15 Easing, > 0.15 Tightening, else Hold.
 
 ## Volatility (VIX)
 
-- **Level (50%)**: 100 inside VIX 12–20. Below 12: `100 − (12−VIX)×8`. Above 20: `100 − (VIX−20)×4`. Clamp 0–100.
-- **1y percentile (25%)**: 100 if 15–80. Above 80: `100 − (p−80)` (floor 40). Below 15: `100 − (15−p)×0.8` (floor 70).
-- **5d slope (25%)**: 100 if `|slope| < 0.3` VIX/day, else `100 − |slope|×25` (floor 40).
+Piecewise interpolation (not a flat 12–20 plateau).
 
-## Momentum (SPY, direction-agnostic)
+- **Level (40%)**: ~100 at VIX 10–13, ~84 at 16, ~70 at 20, ~26 at 30.
+- **5-session Δ (30%)**: last − last[5]. Falling is better (Δ ≤ −1 ≈ 88, Δ ≥ 3 ≈ 28).
+- **1y percentile (20%)**: **low is calmer** (20th ≈ 94, 80th ≈ 34).
+- **VVIX (10%)**: Yahoo `^VVIX`. Missing → that 10% is redistributed to the other three.
 
-- **RSI 14 (35%)**: `|RSI−50| / 25 × 100` (cap 100). Distance from 50 is quality.
-- **\|5d %\| (25%)**: `|ret5| / 3 × 100` (cap 100).
-- **\|20d %\| (25%)**: `|ret20| / 8 × 100` (cap 100).
-- **Sector spread (15%)**: max−min 5d return across 11 sector ETFs, `/ 4 × 100`.
+## Momentum (SPY)
+
+Chop is weak. Directional RSI is usable. Extremes fade.
+
+- **RSI 14 (40%)**: 45–55 → ~34 (chop). 30 → ~72. 60–70 → ~82–86. 0 or 100 → ~44.
+- **\|5d %\| (25%)**: 1% already ~58; 3% ~90.
+- **\|20d %\| (25%)**: 2% already ~62; 8% ~94.
+- **est. put/call (10%)**: from VIX. Lower PCR scores better.
+
+Sector spread / Adv/Dec / ST health are tags.
 
 ## Trend (SPY / QQQ)
 
-- **MA stack (35%)**: SMA20/50/200 all bull or all bear = 100; pairwise same direction = 70; mixed = 25.
-- **ADX 14 (30%)**: ≥25 → 100, ≥20 → 70, ≥15 → 40, else 20.
-- **QQQ vs SPY 20d (20%)**: same sign = 100, else 40.
-- **Distance to SMA200 (15%)**: ≤8% → 90, ≤15% → 70, else 50.
+- **MA stack (50%)**: price + SMA20/50/200. Full bull stack 95, full bear 90, pullback in uptrend 70, mixed 32.
+- **QQQ confirm (30%)**: QQQ vs its own SMA50/200, same side as SPY. Confirmed 88, divergent 22.
+- **Distance to SMA200 (20%)**: a **hill**. Glued to the 200 (~0%) → ~18. Sweet spot ~7% → 90. Stretched 15%+ fades.
+- **ADX 14**: **±10** on the total (not a sub-weight). ≥25 +10, <20 −10.
 
-## Breadth (~50 large-caps)
+## Breadth (~51 large-caps)
 
-For each of SMA 20 / 50 / 200: `consensus = |pct_above − 50| / 50 × 100` (0% or 100% = full consensus).
+U-curve: washout *and* thrust are high quality. 50% above an MA is chop (~30), not zero.
 
-Pillar = 0.40×SMA20 + 0.35×SMA50 + 0.25×SMA200.
+Pillar = 0.25×SMA20 + 0.35×SMA50 + **0.40×SMA200**.
 
 ## Macro
 
-- **10Y 20d change (30%)**: `|Δ| < 0.15` → 100, else `100 − |Δ|×80` (floor 20).
-- **DXY 20d % (30%)**: `|ret| < 1.5` → 100, else `100 − (|ret|−1.5)×20` (floor 20).
-- **FOMC / CPI / NFP (40%)**: none or ≥5d → 100; ≥3d → 70; ≥1d → 40; same day → 15. USD High-impact only.
+Unchanged: 10Y 20d change 30%, DXY 20d % 30%, FOMC/CPI/NFP proximity 40%.
 
-## Execution (5-minute SPY window, daily fallback)
+## Execution overlay (sector 5d, 10% of composite)
 
-Prefers the last ~78 five-minute SPY bars (RTH-ish session). If Yahoo 5m is missing, daily bars are used.
+Not 5-minute VWAP. Cap each sector 5d return at ±5%. If more sectors are down than up → bearish labels (breakdowns %, laggards avg, bounce ratio, SPY 5d). Else bullish (breakouts %, leaders avg, dip ratio, SPY 5d). Equal 25% each.
 
-- **Follow-through (35%)**: 5m: last 8 bars closing with the VWAP side. Daily: last 5 closes matching 20d trend sign. 4–5 → 90, 3 → 70, 2 → 45, else 25.
-- **Close in range (20%)**: `(close−low)/(high−low)` on the last bar. With the trend (≥0.60 in an uptrend or ≤0.40 in a downtrend) → 80, else 50.
-- **Failed break (15%)**: last 3 bars poked a 10d/session high/low then closed back inside → 30, else 80.
-- **Breakdowns hold (15%)**: 5m: last 8 bars below VWAP after being above. Daily: downtrend still below SMA20. True → 80, else 40.
-- **Bounce fail (15%)**: 5m: wick through VWAP, close back below. Daily: down-day up-bar that still closes weak. True → 35, else 75.
-
-The Execution Window panel shows four **regime-adaptive** metrics (Trend vs Chop) and is not extra composite weight beyond the pillar.
-
-## Options prints (Yahoo CBOE, not equity PCR)
-
-`^CPC` / official put-call is not on Yahoo. Pulse prints **SKEW**, **VVIX**, **VIX3M** and keeps **est. put/call** from VIX percentile. Term structure is `VIX / VIX3M` (>1 = near-term fear).
+The 5-minute VWAP window stays on the dashboard as **display only**.
 
 ## Bias (not the quality score)
 

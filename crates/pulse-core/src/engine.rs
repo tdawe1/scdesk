@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bars::{
     above_sma_frac, adx, closes, daily_returns, last_up, overlay_last_close, pct_change,
-    pearson, percentile_rank, rsi, slope, sma, Bar,
+    pearson, percentile_rank, rsi, sma, Bar,
 };
 use crate::calendar::{days_to_next_macro, fetch_calendar, CalEvent};
 use crate::exec::{analyze_5m, analyze_daily, leaders_extend, ExecSnapshot};
@@ -874,7 +874,13 @@ fn build_inputs(
             let last = *c.last()?;
             percentile_rank(c, last)
         }),
-        vix_slope_5: vix_c.as_ref().and_then(|c| slope(c, 5)),
+        vix_slope_5: vix_c.as_ref().and_then(|c| {
+            if c.len() > 5 {
+                Some(c[c.len() - 1] - c[c.len() - 1 - 5])
+            } else {
+                None
+            }
+        }),
         rsi14: spy_c.as_ref().and_then(|c| rsi(c, 14)),
         ret5: spy_c.as_ref().and_then(|c| pct_change(c, 5)),
         ret20: spy_c.as_ref().and_then(|c| pct_change(c, 20)),
@@ -886,6 +892,10 @@ fn build_inputs(
         adx14: spy.and_then(|b| adx(b, 14)),
         spy_ret20,
         qqq_ret20: qqq_c.as_ref().and_then(|c| pct_change(c, 20)),
+        qqq_close: qqq_c.as_ref().and_then(|c| c.last().copied()),
+        qqq_sma50: qqq_c.as_ref().and_then(|c| sma(c, 50)),
+        qqq_sma200: qqq_c.as_ref().and_then(|c| sma(c, 200)),
+        sector_rets_5d: sector_rets.clone(),
         pct_above_sma20: if n20 > 0 {
             Some(a20 as f64 / n20 as f64 * 100.0)
         } else {
@@ -914,11 +924,17 @@ fn build_inputs(
             let last = *c.last()?;
             percentile_rank(c, last).map(|p| 0.55 + p / 100.0 * 0.70)
         }),
-        vol_bias: match (vix_last, vix_c.as_ref().and_then(|c| slope(c, 5))) {
-            (Some(v), Some(s)) if v < 14.0 && s < 0.1 => Some("Calm".into()),
-            (_, Some(s)) if s > 0.4 => Some("Rising".into()),
+        vol_bias: match (vix_last, vix_c.as_ref().and_then(|c| {
+            if c.len() > 5 {
+                Some(c[c.len() - 1] - c[c.len() - 1 - 5])
+            } else {
+                None
+            }
+        })) {
+            (Some(v), Some(s)) if v < 14.0 && s < 0.3 => Some("Calm".into()),
+            (_, Some(s)) if s > 1.0 => Some("Rising".into()),
             (Some(v), _) if v > 22.0 => Some("Elevated".into()),
-            (_, Some(s)) if s < -0.4 => Some("Crushing".into()),
+            (_, Some(s)) if s < -1.0 => Some("Crushing".into()),
             (Some(_), Some(_)) => Some("Stable".into()),
             _ => None,
         },

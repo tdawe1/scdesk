@@ -1,21 +1,24 @@
-# scdesk Pulse scoring weights. Values in a table must sum to 1.0;
-# the engine renormalizes if they do not.
+# scdesk Pulse scoring.
+# Day/Swing tables are the five quality pillars and must sum to 1.0
+# (the engine renormalizes). Execution is a 10% overlay on top, not a sixth
+# pillar in these tables.
 #
-# Quality (0–100) is direction-agnostic: a clean downtrend can score 90.
-# Bias is a separate signed reading.
+# Quality is still mostly direction-agnostic. Bias is a separate signed reading.
+# YES requires both a high composite and a non-NEUTRAL bias.
 
 [day]
-volatility = 0.25
-momentum = 0.20
-trend = 0.20
+volatility = 0.30
+momentum = 0.30
+trend = 0.15
 breadth = 0.15
 macro = 0.10
-execution = 0.10
 
 [swing]
-volatility = 0.15
-momentum = 0.20
-trend = 0.25
+volatility = 0.25
+momentum = 0.25
+trend = 0.20
 breadth = 0.20
-macro = 0.15
-execution = 0.05
+macro = 0.10
+
+[overlay]
+execution = 0.10
