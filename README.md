@@ -1,14 +1,10 @@
 # scdesk
 
-Two Linux desktop apps for people who chart in Sierra Chart (often under Wine).
+Two Linux desktop apps for Sierra Chart.
 
 **Pulse** is a market-quality dashboard for ES/NQ. It pulls public data (Yahoo, Forex Factory) and does not need Sierra Chart running.
 
 **Journal** is a local trade journal. It reads Sierra’s files (fills, TradesList, `.scid`) and can log fills from a small ACSIL study in `acsil/`.
-
-They are separate programs. Scores, layout, and the journal schema are ours — not a reskin of SCS Market Pulse or SCS Trading Journal, and not affiliated with Sierra Chart or SCS.
-
-Linux only. MIT licensed.
 
 ## Pulse
 
