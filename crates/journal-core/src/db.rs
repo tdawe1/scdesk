@@ -11,13 +11,15 @@ use super::stats::{
     PropSnapshot, PropSpec, RuleBreak, Rules,
 };
 use super::{
-    attach_excursion_units, fills_to_trades, parse_fills_text, parse_ndjson_text, parse_tradeslist,
-    CheckItem, JournalError, SavedView, Session, Shot, Trade, TradeFilter, DEFAULT_RISK_TICKS,
+    account_skipped, attach_excursion_units, fills_to_trades, parse_activity_bytes,
+    parse_fills_text, parse_ndjson_text, parse_tradeslist, CheckItem, Dashboard, JournalError,
+    SavedView, Session, Shot, Trade, TradeFilter, DEFAULT_RISK_TICKS,
 };
 
 pub struct Journal {
     conn: Connection,
     pub default_risk_ticks: f64,
+    pub skip_accounts: Vec<String>,
 }
 
 impl Journal {
@@ -29,6 +31,8 @@ impl Journal {
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
             PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS trades (
                 id TEXT PRIMARY KEY,
@@ -94,6 +98,11 @@ impl Journal {
                 name TEXT PRIMARY KEY,
                 filter TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS import_files (
+                path TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                mtime_ms INTEGER NOT NULL
+            );
             "#,
         )?;
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN mae_source TEXT", []);
@@ -101,12 +110,19 @@ impl Journal {
         Ok(Self {
             conn,
             default_risk_ticks: DEFAULT_RISK_TICKS,
+            skip_accounts: Vec::new(),
         })
     }
 
     pub fn upsert_trade(&self, t: &Trade) -> Result<(), JournalError> {
-        let gone: Option<String> = self
-            .conn
+        if account_skipped(&t.account, &self.skip_accounts) {
+            return Ok(());
+        }
+        Self::upsert_trade_on(&self.conn, t)
+    }
+
+    fn upsert_trade_on(conn: &Connection, t: &Trade) -> Result<(), JournalError> {
+        let gone: Option<String> = conn
             .query_row(
                 "SELECT id FROM deleted_ids WHERE id=?1",
                 params![t.id],
@@ -124,8 +140,7 @@ impl Journal {
             Option<f64>,
             Option<f64>,
             Option<f64>,
-        )> = self
-            .conn
+        )> = conn
             .query_row(
                 "SELECT notes, tags, screenshots, mae_source, mfe, mae, post_exit_mfe FROM trades WHERE id=?1",
                 params![t.id],
@@ -160,7 +175,7 @@ impl Journal {
         } else {
             (t.mfe, t.mae, t.post_exit_mfe, t.mae_source.clone())
         };
-        self.conn.execute(
+        conn.execute(
             r#"INSERT INTO trades (
                 id, source_id, account, symbol_raw, symbol_root, listed, is_micro, is_sim,
                 direction, qty, entry_price, exit_price, stop_price, pnl, commission, net_pnl,
@@ -228,13 +243,29 @@ impl Journal {
         Ok(())
     }
 
+    pub fn upsert_trades<I>(&self, trades: I) -> Result<usize, JournalError>
+    where
+        I: IntoIterator<Item = Trade>,
+    {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        for t in trades {
+            if account_skipped(&t.account, &self.skip_accounts) {
+                continue;
+            }
+            Self::upsert_trade_on(&tx, &t)?;
+            n += 1;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn import_ndjson_text(&self, text: &str) -> Result<usize, JournalError> {
         let raw = parse_ndjson_text(text)?;
-        let n = raw.len();
-        for t in raw {
-            self.upsert_trade(&imported_to_trade(&t, self.default_risk_ticks))?;
-        }
-        Ok(n)
+        self.upsert_trades(
+            raw.iter()
+                .map(|t| imported_to_trade(t, self.default_risk_ticks)),
+        )
     }
 
     pub fn import_ndjson_dir(&self, dir: &Path) -> Result<usize, JournalError> {
@@ -255,8 +286,16 @@ impl Journal {
             .collect();
         files.sort();
         for f in files {
+            let Some((size, mtime)) = file_stamp(&f) else {
+                continue;
+            };
+            let key = f.to_string_lossy().into_owned();
+            if self.import_file_unchanged(&key, size, mtime)? {
+                continue;
+            }
             let text = std::fs::read_to_string(&f)?;
             n += self.import_ndjson_text(&text)?;
+            self.remember_import_file(&key, size, mtime)?;
         }
         Ok(n)
     }
@@ -266,12 +305,104 @@ impl Journal {
         if !path.is_file() {
             return Ok(0);
         }
-        let text = std::fs::read_to_string(path)?;
+        let Some((size, mtime)) = file_stamp(&path) else {
+            return Ok(0);
+        };
+        let key = path.to_string_lossy().into_owned();
+        if self.import_file_unchanged(&key, size, mtime)? {
+            return Ok(0);
+        }
+        let text = std::fs::read_to_string(&path)?;
         let fills = parse_fills_text(&text)?;
-        let trades = fills_to_trades(&fills, self.default_risk_ticks);
-        let n = trades.len();
-        for t in trades {
-            self.upsert_trade(&t)?;
+        let n = self.upsert_trades(fills_to_trades(&fills, self.default_risk_ticks))?;
+        self.remember_import_file(&key, size, mtime)?;
+        Ok(n)
+    }
+
+    pub fn import_activity_dir(&self, dir: &Path) -> Result<usize, JournalError> {
+        let mut n = 0;
+        if !dir.is_dir() {
+            return Ok(0);
+        }
+        let mut files: Vec<_> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                name.starts_with("TradeActivityLog_")
+                    && name.ends_with(".data")
+                    && !name.ends_with("None.data")
+            })
+            .collect();
+        files.sort();
+        for f in files {
+            let Some((size, mtime)) = file_stamp(&f) else {
+                continue;
+            };
+            let key = f.to_string_lossy().into_owned();
+            if self.import_file_unchanged(&key, size, mtime)? {
+                continue;
+            }
+            let bytes = std::fs::read(&f)?;
+            let fills = parse_activity_bytes(&bytes)?;
+            let mut trades = fills_to_trades(&fills, self.default_risk_ticks);
+            for t in &mut trades {
+                t.source = "activity".into();
+            }
+            n += self.upsert_trades(trades)?;
+            self.remember_import_file(&key, size, mtime)?;
+        }
+        Ok(n)
+    }
+
+    fn import_file_unchanged(
+        &self,
+        path: &str,
+        size: i64,
+        mtime_ms: i64,
+    ) -> Result<bool, JournalError> {
+        let row: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT size, mtime_ms FROM import_files WHERE path=?1",
+                params![path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(matches!(row, Some((s, m)) if s == size && m == mtime_ms))
+    }
+
+    fn remember_import_file(
+        &self,
+        path: &str,
+        size: i64,
+        mtime_ms: i64,
+    ) -> Result<(), JournalError> {
+        self.conn.execute(
+            "INSERT INTO import_files(path, size, mtime_ms) VALUES(?1,?2,?3)
+             ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ms=excluded.mtime_ms",
+            params![path, size, mtime_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_import_fingerprints(&self) -> Result<(), JournalError> {
+        self.conn.execute("DELETE FROM import_files", [])?;
+        Ok(())
+    }
+
+    pub fn delete_by_account(&self, account: &str) -> Result<usize, JournalError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM trades WHERE account=?1", params![account])?;
+        Ok(n)
+    }
+
+    pub fn purge_skip_accounts(&self) -> Result<usize, JournalError> {
+        let accounts = self.skip_accounts.clone();
+        let mut n = 0;
+        for a in accounts {
+            n += self.delete_by_account(&a)?;
         }
         Ok(n)
     }
@@ -327,12 +458,7 @@ impl Journal {
     }
 
     pub fn import_tradeslist_text(&self, text: &str) -> Result<usize, JournalError> {
-        let trades = parse_tradeslist(text)?;
-        let n = trades.len();
-        for t in trades {
-            self.upsert_trade(&t)?;
-        }
-        Ok(n)
+        self.upsert_trades(parse_tradeslist(text)?)
     }
 
     pub fn delete_trade(&self, id: &str) -> Result<(), JournalError> {
@@ -421,14 +547,20 @@ impl Journal {
     }
 
     pub fn list_trades(&self, f: &TradeFilter) -> Result<Vec<Trade>, JournalError> {
-        let mut stmt = self.conn.prepare(
+        self.list_trades_inner(f, false)
+    }
+
+    fn list_trades_inner(&self, f: &TradeFilter, heavy: bool) -> Result<Vec<Trade>, JournalError> {
+        let fills_col = if heavy { "fills" } else { "'[]'" };
+        let sql = format!(
             "SELECT id, source_id, account, symbol_raw, symbol_root, listed, is_micro, is_sim,
                     direction, qty, entry_price, exit_price, stop_price, pnl, commission, net_pnl,
                     initial_risk, r_value, mfe, mae, duration_seconds, open_epoch_ms, close_epoch_ms,
                     open_datetime, close_datetime, trading_day, is_closed, notes, tags, screenshots,
-                    tick_size, currency_per_tick, source, fills, mae_source, post_exit_mfe
-             FROM trades ORDER BY open_epoch_ms DESC",
-        )?;
+                    tick_size, currency_per_tick, source, {fills_col}, mae_source, post_exit_mfe
+             FROM trades ORDER BY open_epoch_ms DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], Self::row_to_trade)?;
         let mut out = Vec::new();
         for r in rows {
@@ -437,7 +569,9 @@ impl Journal {
                 continue;
             }
             let mut t = t;
-            t.checklist = self.load_checklist(&t.id).unwrap_or_default();
+            if heavy {
+                t.checklist = self.load_checklist(&t.id).unwrap_or_default();
+            }
             out.push(t);
         }
         Ok(out)
@@ -465,6 +599,57 @@ impl Journal {
             .prepare("SELECT DISTINCT account FROM trades ORDER BY account")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn dashboard(
+        &self,
+        f: &TradeFilter,
+        tz: &str,
+        rules: &Rules,
+        mc_runs: usize,
+    ) -> Result<Dashboard, JournalError> {
+        let trades = self.list_trades(f)?;
+        let equity = equity_curve(&trades);
+        let mut breaks = rule_breaks(&trades, rules);
+        let prop_specs = self.list_prop()?;
+        for spec in &prop_specs {
+            let snap = prop_snapshot(&trades, spec);
+            if snap.buffer < 0.0 {
+                breaks.push(RuleBreak {
+                    date: spec.account.clone(),
+                    kind: "prop".into(),
+                    text: format!(
+                        "{} buffer {:.0} (floor breached)",
+                        spec.account, snap.buffer
+                    ),
+                });
+            }
+        }
+        let props = prop_specs
+            .iter()
+            .map(|s| prop_snapshot(&trades, s))
+            .collect();
+        let gallery = trades
+            .iter()
+            .filter(|t| !t.screenshots.is_empty())
+            .cloned()
+            .collect();
+        Ok(Dashboard {
+            kpis: kpis(&trades),
+            equity: equity.clone(),
+            calendar: calendar(&trades),
+            hours: hour_histogram(&trades, tz),
+            monte: monte_carlo(&trades, mc_runs),
+            accounts: self.accounts()?,
+            breaks,
+            gallery,
+            drawdown: drawdown_series(&equity),
+            r_hist: r_histogram(&trades, 16),
+            mfe_mae: mfe_mae_points(&trades),
+            props,
+            views: self.list_views()?,
+            trades,
+        })
     }
 
     pub fn kpis(&self, f: &TradeFilter) -> Result<Kpis, JournalError> {
@@ -754,7 +939,22 @@ fn parse_shots(raw: &str) -> Vec<Shot> {
     Vec::new()
 }
 
+fn file_stamp(path: &Path) -> Option<(i64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let size = i64::try_from(meta.len()).ok()?;
+    let mtime_ms = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    Some((size, mtime_ms))
+}
+
 fn match_filter(t: &Trade, f: &TradeFilter) -> bool {
+    if account_skipped(&t.account, &f.blocked_accounts) {
+        return false;
+    }
     if f.exclude_sim && t.is_sim {
         return false;
     }

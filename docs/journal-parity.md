@@ -5,6 +5,7 @@ Independent implementation. Schema, scoring of R, and UI are ours.
 | Feature | Status |
 | --- | --- |
 | NDJSON `Data/Journal/trades_*.ndjson` | done |
+| Sierra Trade Activity Log `.data` fills | done |
 | Sierra TradesList TSV | done |
 | ACSIL `Data/scdesk/fills.ndjson` | done |
 | SQLite WAL `~/.local/share/scdesk/journal.sqlite` | done |
@@ -27,5 +28,6 @@ Independent implementation. Schema, scoring of R, and UI are ours.
 | CSV export | done |
 | sqlite backup | done |
 | Folder watch + 60s poll | done |
+| Blocked accounts (Settings list) | done |
 | Rolling ffmpeg video | out of scope |
 | NinjaTrader | out of scope |

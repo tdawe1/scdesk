@@ -31,10 +31,11 @@ If GitHub has a newer release it will say so. It will not download or install an
 Trades land in `~/.local/share/scdesk/journal.sqlite`. On launch (and when Sierra’s files change) it imports:
 
 - `Data/Journal/trades_*.ndjson`
+- `TradeActivityLogs/TradeActivityLog_*.data` (Sierra’s own fill log)
 - `Data/scdesk/fills.ndjson` from our ACSIL study
 - Sierra TradesList TSV if you paste it in Settings
 
-You get a dashboard (P&L, win rate, equity, Monte Carlo on R), the trade list with notes/tags/screenshots, calendar, gallery, session diary, and daily risk rules. R is net P&L over initial risk (stop if you had one, otherwise the default tick risk in Settings).
+You get a dashboard (P&L, win rate, equity, Monte Carlo on R), the trade list with notes/tags/screenshots, calendar, gallery, session diary, and daily risk rules. R is net P&L over initial risk (stop if you had one, otherwise the default tick risk in Settings). Settings can block named accounts from import and KPIs.
 
 MFE/MAE can be filled from the matching `.scid` in `Data/`. If you blow a daily rule or a prop-firm floor, Journal writes `Data/scdesk/tm_halt.json`. Rebuild `acsil/scdesk_journal.cpp` inside Sierra if you want that file to flatten the account or to start a chart replay from `replay.json`.
 

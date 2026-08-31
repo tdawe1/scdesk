@@ -84,11 +84,28 @@
   };
   type Settings = {
     exclude_sim: boolean;
+    blocked_accounts: string[];
     default_risk_ticks: number;
     unit: string;
     session_tz: string;
     rules: { max_trades_per_day: number; max_daily_loss: number; max_daily_loss_r: number };
     checklist: { id: string; label: string; checked: boolean }[];
+  };
+  type Dashboard = {
+    trades: Trade[];
+    kpis: Kpis;
+    equity: Eq[];
+    calendar: Day[];
+    hours: [number, number, number][];
+    monte: Mc;
+    accounts: string[];
+    breaks: Break[];
+    gallery: Trade[];
+    drawdown: Eq[];
+    r_hist: [number, number][];
+    mfe_mae: [number, number, number][];
+    props: Prop[];
+    views: SavedView[];
   };
   type PropSpec = {
     account: string;
@@ -146,6 +163,7 @@
   let cropDraft = $state<{ x: number; y: number; w: number; h: number } | null>(null);
   let cropOrigin = $state<{ x: number; y: number } | null>(null);
   let newCheckLabel = $state("");
+  let blockDraft = $state("");
 
   const unit = $derived(settings?.unit === "R" ? "R" : "$");
   function money(n: number | null | undefined): string {
@@ -184,37 +202,28 @@
         direction: filter.direction || null,
         exclude_sim: settings?.exclude_sim ?? false,
       };
-      const [t, k, e, c, h, m, a, b, g, ddown, rh, sc, pr, vs] = await Promise.all([
-        invoke<Trade[]>("list_trades", { filter: f }),
-        invoke<Kpis>("kpis", { filter: f }),
-        invoke<Eq[]>("equity", { filter: f }),
-        invoke<Day[]>("calendar", { filter: f }),
-        invoke<[number, number, number][]>("hours", { filter: f }),
-        invoke<Mc>("monte", { filter: f }),
-        invoke<string[]>("accounts"),
-        invoke<Break[]>("rule_breaks", { filter: f }),
-        invoke<Trade[]>("gallery", { filter: f }),
-        invoke<Eq[]>("drawdown", { filter: f }),
-        invoke<[number, number][]>("r_hist", { filter: f }),
-        invoke<[number, number, number][]>("mfe_mae", { filter: f }),
-        invoke<Prop[]>("prop_tiles", { filter: f }),
-        invoke<SavedView[]>("list_views"),
-      ]);
-      trades = t;
-      kpis = k;
-      equity = e;
-      days = c;
-      hours = h;
-      mc = m;
-      accts = a;
-      breaks = b;
-      gallery = g;
-      dd = ddown;
-      rhist = rh;
-      scatter = sc;
-      props = pr;
-      views = vs;
-      void invoke("write_halt", { breaks: b });
+      const snap = await invoke<Dashboard>("dashboard", { filter: f });
+      trades = snap.trades;
+      kpis = snap.kpis;
+      equity = snap.equity;
+      days = snap.calendar;
+      hours = snap.hours;
+      mc = snap.monte;
+      accts = snap.accounts;
+      breaks = snap.breaks;
+      gallery = snap.gallery;
+      dd = snap.drawdown;
+      rhist = snap.r_hist;
+      scatter = snap.mfe_mae;
+      props = snap.props;
+      views = snap.views;
+      if (selected) {
+        const full = await invoke<Trade | null>("get_trade", { id: selected.id });
+        selected = full ?? trades.find((x) => x.id === selected?.id) ?? selected;
+        noteDraft = selected.notes;
+        tagDraft = selected.tags.join(", ");
+      }
+      void invoke("write_halt", { breaks: snap.breaks });
       error = null;
     } catch (e) {
       error = String(e);
@@ -225,11 +234,10 @@
     if (!quiet) importing = true;
     try {
       const n = await invoke<number>("import_journal");
-      const sc = await invoke<number>("scan_missing_scid");
       if (!quiet) {
-        error = n || sc ? `imported ${n} · scid ${sc}` : "no new NDJSON / .scid";
+        error = n ? `imported ${n}` : "no new NDJSON";
       }
-      if (n || sc || !quiet) await refresh();
+      if (n || !quiet) await refresh();
     } catch (e) {
       if (!quiet) error = String(e);
     } finally {
@@ -283,9 +291,9 @@
   }
 
   async function pick(t: Trade) {
-    selected = t;
-    noteDraft = t.notes;
-    tagDraft = t.tags.join(", ");
+    selected = (await invoke<Trade | null>("get_trade", { id: t.id })) ?? t;
+    noteDraft = selected.notes;
+    tagDraft = selected.tags.join(", ");
     tab = "trades";
   }
 
@@ -298,7 +306,6 @@
       .filter(Boolean);
     await invoke("save_tags", { id: selected.id, tags });
     await refresh();
-    selected = trades.find((x) => x.id === selected?.id) ?? selected;
   }
 
   async function remove(id: string) {
@@ -310,7 +317,11 @@
   async function persistSettings(partial: Partial<Settings>) {
     if (!settings) return;
     settings = await invoke<Settings>("save_settings", { settings: { ...settings, ...partial } });
-    await refresh();
+    if (partial.blocked_accounts) {
+      await doImport(true);
+    } else {
+      await refresh();
+    }
   }
 
   async function loadSession(date: string) {
@@ -393,7 +404,6 @@
       const r = await invoke<unknown>("scan_scid", { id: selected.id });
       error = r ? "scid MFE/MAE applied" : "no matching .scid";
       await refresh();
-      selected = trades.find((x) => x.id === selected?.id) ?? selected;
     } catch (e) {
       error = String(e);
     }
@@ -489,7 +499,8 @@
   onMount(() => {
     void (async () => {
       settings = await invoke<Settings>("get_settings");
-      await doImport();
+      await refresh();
+      void doImport(true);
     })();
     window.addEventListener("paste", onPaste);
     const tick = setInterval(() => void doImport(true), 60_000);
@@ -963,6 +974,34 @@
           onchange={(e) => persistSettings({ exclude_sim: e.currentTarget.checked })}
         /> exclude sim from stats</label
       >
+      <h3>blocked accounts</h3>
+      <p class="muted">skipped on import and omitted from KPIs. already-imported rows are deleted.</p>
+      {#each settings.blocked_accounts as a}
+        <div class="shotrow">
+          <code>{a}</code>
+          <button
+            onclick={() =>
+              persistSettings({
+                blocked_accounts: settings!.blocked_accounts.filter((x) => x !== a),
+              })}>×</button
+          >
+        </div>
+      {/each}
+      <div class="shotrow">
+        <input placeholder="account id" bind:value={blockDraft} />
+        <button
+          onclick={() => {
+            const id = blockDraft.trim();
+            if (!id || !settings) return;
+            if (settings.blocked_accounts.some((x) => x.toLowerCase() === id.toLowerCase())) {
+              blockDraft = "";
+              return;
+            }
+            void persistSettings({ blocked_accounts: [...settings.blocked_accounts, id] });
+            blockDraft = "";
+          }}>block</button
+        >
+      </div>
       <label class="muted">default risk ticks (when no stop)
         <input
           type="number"
@@ -1054,7 +1093,7 @@
 </div>
 
 <style>
-  .desk { height: 100%; overflow: auto; padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 14px; }
+  .desk { height: calc(100% - 2 * var(--window-inset)); width: calc(100% - 2 * var(--window-inset)); margin: var(--window-inset); overflow: auto; padding: 0 0 12px; display: flex; flex-direction: column; gap: 14px; }
   header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; position: sticky; top: 0; background: color-mix(in srgb, var(--bg) 92%, transparent); padding-bottom: 8px; border-bottom: 1px solid var(--border); }
   .brand { letter-spacing: 0.12em; text-transform: uppercase; font-size: 11px; color: var(--muted); }
   nav { display: flex; flex-wrap: wrap; gap: 4px; }

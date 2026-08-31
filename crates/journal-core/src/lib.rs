@@ -1,11 +1,13 @@
 //! Local trade journal: NDJSON / TradesList import, SQLite, stats.
 
+mod activity;
 mod db;
 mod fills;
 mod ndjson;
 mod stats;
 mod tradeslist;
 
+pub use activity::parse_activity_bytes;
 pub use contracts::{parse_symbol, resolve_currency_per_tick, ParsedSymbol};
 pub use db::Journal;
 pub use fills::{fills_to_trades, parse_fills_text, AcsilFill};
@@ -32,6 +34,8 @@ pub struct TradeFilter {
     pub exclude_sim: bool,
     pub closed_only: bool,
     pub query: String,
+    /// Exact account ids omitted from stats/lists (still optional in Settings).
+    pub blocked_accounts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +131,25 @@ pub struct Session {
     pub market_condition: String,
 }
 
+/// One round-trip for the dashboard (stats share a single trade load).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dashboard {
+    pub trades: Vec<Trade>,
+    pub kpis: Kpis,
+    pub equity: Vec<EquityPoint>,
+    pub calendar: Vec<CalendarDay>,
+    pub hours: Vec<(u32, f64, usize)>,
+    pub monte: MonteCarlo,
+    pub accounts: Vec<String>,
+    pub breaks: Vec<RuleBreak>,
+    pub gallery: Vec<Trade>,
+    pub drawdown: Vec<EquityPoint>,
+    pub r_hist: Vec<(f64, usize)>,
+    pub mfe_mae: Vec<(f64, f64, f64)>,
+    pub props: Vec<PropSnapshot>,
+    pub views: Vec<SavedView>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
     #[error("sqlite: {0}")]
@@ -161,6 +184,10 @@ pub fn default_checklist() -> Vec<CheckItem> {
 pub fn is_sim_account(account: &str) -> bool {
     let u = account.to_ascii_uppercase();
     u.contains("SIM") || u.starts_with("DEMO")
+}
+
+pub fn account_skipped(account: &str, skip: &[String]) -> bool {
+    skip.iter().any(|s| s.eq_ignore_ascii_case(account))
 }
 
 pub fn trading_day(open_epoch_ms: i64, tz_offset_min: i32) -> String {
@@ -538,5 +565,163 @@ mod tests {
         let j2 = Journal::open(&dest).unwrap();
         assert_eq!(j2.list_trades(&TradeFilter::default()).unwrap().len(), 2);
         assert_eq!(default_checklist().len(), 4);
+    }
+
+    #[test]
+    fn account_skipped_is_case_insensitive() {
+        let blocked = vec!["Eval-One".into()];
+        assert!(account_skipped("eval-one", &blocked));
+        assert!(account_skipped("EVAL-ONE", &blocked));
+        assert!(!account_skipped("live", &blocked));
+        assert!(TradeFilter::default().blocked_accounts.is_empty());
+    }
+
+    #[test]
+    fn skip_accounts_are_not_imported_and_are_purged() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        assert_eq!(j.list_trades(&TradeFilter::default()).unwrap().len(), 2);
+        let hidden = j
+            .list_trades(&TradeFilter {
+                blocked_accounts: vec!["SIM1".into()],
+                ..TradeFilter::default()
+            })
+            .unwrap();
+        assert!(hidden.is_empty());
+
+        let mut j = Journal::open(&dir.path().join("j2.sqlite")).unwrap();
+        j.skip_accounts = vec!["SIM1".into()];
+        assert_eq!(
+            j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+                .unwrap(),
+            0
+        );
+        assert!(j.list_trades(&TradeFilter::default()).unwrap().is_empty());
+
+        let mut j = Journal::open(&dir.path().join("j3.sqlite")).unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        j.skip_accounts = vec!["SIM1".into()];
+        assert_eq!(j.purge_skip_accounts().unwrap(), 2);
+        assert!(j.list_trades(&TradeFilter::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ndjson_dir_skips_unchanged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        let src = dir.path().join("Journal");
+        std::fs::create_dir_all(&src).unwrap();
+        let f = src.join("trades_sample.ndjson");
+        std::fs::write(&f, include_str!("../../../testdata/trades_sample.ndjson")).unwrap();
+        assert_eq!(j.import_ndjson_dir(&src).unwrap(), 2);
+        assert_eq!(j.import_ndjson_dir(&src).unwrap(), 0);
+        j.clear_import_fingerprints().unwrap();
+        assert_eq!(j.import_ndjson_dir(&src).unwrap(), 2);
+    }
+
+    #[test]
+    fn list_trades_is_light_get_trade_loads_fills() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        let listed = j.list_trades(&TradeFilter::default()).unwrap();
+        assert!(listed[0].fills.is_empty());
+        assert!(listed[0].checklist.is_empty());
+        let full = j.get_trade(&listed[0].id).unwrap().unwrap();
+        assert!(!full.fills.is_empty());
+    }
+
+    #[test]
+    fn dashboard_uses_one_trade_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        let d = j
+            .dashboard(&TradeFilter::default(), "UTC", &Rules::default(), 8)
+            .unwrap();
+        assert_eq!(d.trades.len(), 2);
+        assert_eq!(d.kpis.trades, 2);
+        assert_eq!(d.equity.len(), d.kpis.trades);
+        assert!(d.monte.runs > 0);
+    }
+
+    #[test]
+    fn trade_activity_log_groups_nq_fills() {
+        let open_ms = 1_788_200_000_000;
+        let close_ms = open_ms + 60_000;
+        let mut bytes = crate::activity::encode_fill_for_test(
+            scid::unix_ms_to_ole_us(open_ms),
+            "NQU6.CME",
+            "ACC1",
+            1,
+            1.0,
+            2_345_125.0, // stored as quote * 100
+            1.0,
+        );
+        bytes.extend(crate::activity::encode_fill_for_test(
+            scid::unix_ms_to_ole_us(close_ms),
+            "NQU6.CME",
+            "ACC1",
+            2,
+            1.0,
+            2_346_125.0,
+            0.0,
+        ));
+        let fills = parse_activity_bytes(&bytes).unwrap();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[0].account, "ACC1");
+        assert!(
+            (fills[0].price - 23451.25).abs() < 1e-9,
+            "{}",
+            fills[0].price
+        );
+        assert!((fills[1].price - 23461.25).abs() < 1e-9);
+        let trades = fills_to_trades(&fills, 8.0);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].direction, "LONG");
+        assert!(trades[0].is_closed);
+        assert!(trades[0].net_pnl > 0.0);
+    }
+
+    #[test]
+    fn trade_activity_dir_import_and_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        let logs = dir.path().join("TradeActivityLogs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let open_ms = 1_788_200_000_000;
+        let mut bytes = crate::activity::encode_fill_for_test(
+            scid::unix_ms_to_ole_us(open_ms),
+            "NQU6.CME",
+            "ACC1",
+            1,
+            1.0,
+            2_345_000.0,
+            1.0,
+        );
+        bytes.extend(crate::activity::encode_fill_for_test(
+            scid::unix_ms_to_ole_us(open_ms + 1_000),
+            "NQU6.CME",
+            "ACC1",
+            2,
+            1.0,
+            2_346_000.0,
+            0.0,
+        ));
+        std::fs::write(
+            logs.join("TradeActivityLog_2026-08-31_UTC.ACC1.data"),
+            bytes,
+        )
+        .unwrap();
+        assert_eq!(j.import_activity_dir(&logs).unwrap(), 1);
+        assert_eq!(j.import_activity_dir(&logs).unwrap(), 0);
+        let t = &j.list_trades(&TradeFilter::default()).unwrap()[0];
+        assert_eq!(t.account, "ACC1");
+        assert_eq!(t.source, "activity");
     }
 }

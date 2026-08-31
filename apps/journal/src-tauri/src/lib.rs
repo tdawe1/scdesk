@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use journal_core::{
-    default_checklist, scid_for_trade, CheckItem, Journal, Kpis, MonteCarlo, PropSnapshot,
-    PropSpec, RuleBreak, Rules, SavedView, Session, Shot, Trade, TradeFilter,
+    default_checklist, scid_for_trade, CheckItem, Dashboard, Journal, Kpis, MonteCarlo,
+    PropSnapshot, PropSpec, RuleBreak, Rules, SavedView, Session, Shot, Trade, TradeFilter,
 };
 use serde::{Deserialize, Serialize};
 use sierra_paths::{discover_from_os, Discovery};
@@ -18,6 +18,8 @@ struct AppState {
 struct AppSettings {
     #[serde(default)]
     exclude_sim: bool,
+    #[serde(default)]
+    blocked_accounts: Vec<String>,
     #[serde(default = "eight")]
     default_risk_ticks: f64,
     #[serde(default = "dollar")]
@@ -44,6 +46,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             exclude_sim: false,
+            blocked_accounts: Vec::new(),
             default_risk_ticks: 8.0,
             unit: "$".into(),
             rules: Rules::default(),
@@ -124,8 +127,12 @@ fn save_settings_file(path: &PathBuf, s: &AppSettings) {
 }
 
 fn with_filter(state: &AppState, mut f: TradeFilter) -> TradeFilter {
-    if state.settings.lock().unwrap().exclude_sim {
+    let s = state.settings.lock().unwrap();
+    if s.exclude_sim {
         f.exclude_sim = true;
+    }
+    if f.blocked_accounts.is_empty() {
+        f.blocked_accounts = s.blocked_accounts.clone();
     }
     f
 }
@@ -145,9 +152,20 @@ fn save_settings(
     state: tauri::State<AppState>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
+    let prev_blocked = state
+        .settings
+        .lock()
+        .map_err(|e| e.to_string())?
+        .blocked_accounts
+        .clone();
     {
         let mut j = state.journal.lock().map_err(|e| e.to_string())?;
         j.default_risk_ticks = settings.default_risk_ticks;
+        j.skip_accounts = settings.blocked_accounts.clone();
+        if prev_blocked != settings.blocked_accounts {
+            j.clear_import_fingerprints().map_err(|e| e.to_string())?;
+            j.purge_skip_accounts().map_err(|e| e.to_string())?;
+        }
     }
     save_settings_file(&state.settings_path, &settings);
     *state.settings.lock().map_err(|e| e.to_string())? = settings.clone();
@@ -163,7 +181,7 @@ fn import_discovered(j: &Journal) -> Result<usize, String> {
             .map_err(|e| e.to_string())?;
         n += j.import_fills_dir(&p.data_dir).map_err(|e| e.to_string())?;
         n += j
-            .import_screenshots_dir(&p.journal_dir.join("screenshots"))
+            .import_activity_dir(&p.root.join("TradeActivityLogs"))
             .map_err(|e| e.to_string())?;
     }
     for extra in &disc.extras {
@@ -174,16 +192,50 @@ fn import_discovered(j: &Journal) -> Result<usize, String> {
             .import_fills_dir(&extra.data_dir)
             .map_err(|e| e.to_string())?;
         n += j
+            .import_activity_dir(&extra.root.join("TradeActivityLogs"))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(n)
+}
+
+fn import_shots(j: &Journal) -> Result<usize, String> {
+    let disc = discover_from_os();
+    let mut n = 0;
+    if let Some(p) = &disc.primary {
+        n += j
+            .import_screenshots_dir(&p.journal_dir.join("screenshots"))
+            .map_err(|e| e.to_string())?;
+    }
+    for extra in &disc.extras {
+        n += j
             .import_screenshots_dir(&extra.journal_dir.join("screenshots"))
             .map_err(|e| e.to_string())?;
     }
     Ok(n)
 }
 
+fn watch_path_relevant(path: &std::path::Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name == "tm_halt.json" || name == "replay.json" {
+        return false;
+    }
+    (name.starts_with("trades_") && name.ends_with(".ndjson"))
+        || name == "fills.ndjson"
+        || (name.starts_with("tradeactivitylog_") && name.ends_with(".data"))
+        || name.ends_with(".png")
+        || name.ends_with(".jpg")
+        || name.ends_with(".jpeg")
+}
+
 #[tauri::command]
 fn import_journal(state: tauri::State<AppState>) -> Result<usize, String> {
     let j = state.journal.lock().map_err(|e| e.to_string())?;
-    import_discovered(&j)
+    let n = import_discovered(&j)?;
+    Ok(n + import_shots(&j)?)
 }
 
 #[tauri::command]
@@ -204,6 +256,21 @@ fn list_trades(state: tauri::State<AppState>, filter: TradeFilter) -> Result<Vec
         .lock()
         .map_err(|e| e.to_string())?
         .list_trades(&f)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn dashboard(state: tauri::State<AppState>, filter: TradeFilter) -> Result<Dashboard, String> {
+    let f = with_filter(&state, filter);
+    let (tz, rules) = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        (s.session_tz.clone(), s.rules.clone())
+    };
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .dashboard(&f, &tz, &rules, 400)
         .map_err(|e| e.to_string())
 }
 
@@ -629,6 +696,17 @@ fn delete_view(state: tauri::State<AppState>, name: String) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
+fn spawn_background_import(journal: Arc<Mutex<Journal>>) {
+    let _ = std::thread::Builder::new()
+        .name("scdesk-journal-import".into())
+        .spawn(move || {
+            if let Ok(j) = journal.lock() {
+                let _ = import_discovered(&j);
+                let _ = import_shots(&j);
+            }
+        });
+}
+
 fn spawn_journal_watch(journal: Arc<Mutex<Journal>>) {
     let _ = std::thread::Builder::new()
         .name("scdesk-journal-watch".into())
@@ -645,10 +723,12 @@ fn spawn_journal_watch(journal: Arc<Mutex<Journal>>) {
                 roots.push(p.journal_dir.clone());
                 roots.push(p.data_dir.join("scdesk"));
                 roots.push(p.journal_dir.join("screenshots"));
+                roots.push(p.root.join("TradeActivityLogs"));
             }
             for extra in &disc.extras {
                 roots.push(extra.journal_dir.clone());
                 roots.push(extra.data_dir.join("scdesk"));
+                roots.push(extra.root.join("TradeActivityLogs"));
             }
             for r in &roots {
                 let _ = std::fs::create_dir_all(r);
@@ -658,19 +738,51 @@ fn spawn_journal_watch(journal: Arc<Mutex<Journal>>) {
                 return;
             }
             loop {
-                if rx.recv().is_err() {
-                    return;
-                }
+                let first = match rx.recv() {
+                    Ok(Ok(ev)) => ev,
+                    Ok(Err(_)) => continue,
+                    Err(_) => return,
+                };
+                let mut shots_only = first.paths.iter().all(|p| {
+                    let n = p
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    n.ends_with(".png") || n.ends_with(".jpg") || n.ends_with(".jpeg")
+                });
+                let mut relevant = first.paths.iter().any(|p| watch_path_relevant(p));
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_millis(800)) {
-                        Ok(_) => continue,
+                        Ok(Ok(ev)) => {
+                            if ev.paths.iter().any(|p| watch_path_relevant(p)) {
+                                relevant = true;
+                            }
+                            if !ev.paths.iter().all(|p| {
+                                let n = p
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("")
+                                    .to_ascii_lowercase();
+                                n.ends_with(".png") || n.ends_with(".jpg") || n.ends_with(".jpeg")
+                            }) {
+                                shots_only = false;
+                            }
+                        }
+                        Ok(Err(_)) => continue,
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                     }
                 }
+                if !relevant {
+                    continue;
+                }
                 if let Ok(j) = journal.lock() {
-                    let _ = import_discovered(&j);
-                    let _ = j.scan_missing_scid(&scid_dirs(), 40);
+                    if shots_only {
+                        let _ = import_shots(&j);
+                    } else {
+                        let _ = import_discovered(&j);
+                    }
                 }
             }
         });
@@ -729,19 +841,10 @@ pub fn run() {
     let settings = load_settings(&settings_path);
     let mut journal = Journal::open(&db_path()).expect("journal sqlite");
     journal.default_risk_ticks = settings.default_risk_ticks;
-    let disc = discover_from_os();
-    if let Some(p) = &disc.primary {
-        let _ = journal.import_ndjson_dir(&p.journal_dir);
-        let _ = journal.import_fills_dir(&p.data_dir);
-        let _ = journal.import_screenshots_dir(&p.journal_dir.join("screenshots"));
-    }
-    for extra in &disc.extras {
-        let _ = journal.import_ndjson_dir(&extra.journal_dir);
-        let _ = journal.import_fills_dir(&extra.data_dir);
-        let _ = journal.import_screenshots_dir(&extra.journal_dir.join("screenshots"));
-    }
-    let _ = journal.scan_missing_scid(&scid_dirs(), 80);
+    journal.skip_accounts = settings.blocked_accounts.clone();
+    let _ = journal.purge_skip_accounts();
     let journal = Arc::new(Mutex::new(journal));
+    spawn_background_import(Arc::clone(&journal));
     spawn_journal_watch(Arc::clone(&journal));
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -757,6 +860,7 @@ pub fn run() {
             import_journal,
             import_tradeslist,
             list_trades,
+            dashboard,
             get_trade,
             kpis,
             equity,

@@ -4,7 +4,8 @@ Local SQLite journal for Sierra Chart fills. Independent of SCS Trading Journal.
 
 ## What it does
 
-- Imports `Data/Journal/trades_*.ndjson` (existing SCS study output) on launch and via **import**
+- Imports `Data/Journal/trades_*.ndjson` (existing SCS study output) in the background on launch and via **import**
+- Imports Sierra `TradeActivityLogs/TradeActivityLog_*.data` (native fills, including accounts the chart study never logged)
 - Imports Sierra **TradesList** TSV (paste in Settings)
 - Stores trades at `~/.local/share/scdesk/journal.sqlite` (WAL)
 - Contract specs from `crates/contracts` (MES vs ES tick value)
@@ -13,20 +14,21 @@ Local SQLite journal for Sierra Chart fills. Independent of SCS Trading Journal.
 - Calendar heatmap, R-by-hour, Gallery, Edge (named saved views), Diary (session notes), Rules
 - Tombstones: deleted ids are not resurrected on reimport
 - `$` / `R` toggle. Sim accounts can be excluded from stats
+- Settings → blocked accounts: skipped on import and dropped from KPIs (list is yours, stored in `~/.config/scdesk/journal.toml`)
 
 ## Also
 
-- `.scid` MFE/MAE + 30m post-exit MFE from Sierra `Data/*.scid` (trade detail → **.scid MFE**)
+- `.scid` MFE/MAE + 30m post-exit MFE from Sierra `Data/*.scid` (trade detail → **.scid MFE**; not scanned on every import)
 - ACSIL `Data/scdesk/fills.ndjson` import (flat-to-flat grouping)
 - Screenshots folder `{Journal}/screenshots` matched by id/symbol+date
 - Prop-firm tiles (buffer / target remaining); halt file `Data/scdesk/tm_halt.json` when rules break
 - Drawdown, R histogram, MAE/MFE scatter, yearly heatmap, checklist, screenshot reorder + render
-- Auto `.scid` scan on import (closed trades missing `mae_source=scid`)
 - MFE/MAE in price, ticks, and R
 - CSV export of the current filter
 - Session timezone (default America/Chicago) for R-by-hour
 - Prop buffer < 0 is a rule break (feeds the halt file)
-- Filesystem watch on Journal / fills folders (60s poll as fallback)
+- Filesystem watch on `trades_*.ndjson` / `fills.ndjson` / `TradeActivityLog_*.data` / screenshots (ignores `tm_halt.json` / `replay.json`)
+- Unchanged NDJSON files are skipped (size + mtime fingerprint)
 - **replay cmd** writes `replay.json`; ACSIL `StartChartReplay` if enabled on the study
 - Checklist template (Settings) and sqlite backup (`~/.local/share/scdesk/backups/`)
 
