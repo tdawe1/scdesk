@@ -27,11 +27,8 @@ pub const CORE_SYMBOLS: &[(&str, &str)] = &[
 ];
 
 /// CBOE options prints available on Yahoo (not the equity PCR series).
-pub const OPTION_SYMBOLS: &[(&str, &str)] = &[
-    ("SKEW", "^SKEW"),
-    ("VVIX", "^VVIX"),
-    ("VIX3M", "^VIX3M"),
-];
+pub const OPTION_SYMBOLS: &[(&str, &str)] =
+    &[("SKEW", "^SKEW"), ("VVIX", "^VVIX"), ("VIX3M", "^VIX3M")];
 
 pub const SECTOR_SYMBOLS: &[(&str, &str)] = &[
     ("XLK", "XLK"),
@@ -348,10 +345,7 @@ pub fn parse_earnings_json(symbol: &str, body: &str) -> Option<EarnEvent> {
     })
 }
 
-pub async fn fetch_earnings(
-    client: &reqwest::Client,
-    symbols: &[&str],
-) -> Vec<EarnEvent> {
+pub async fn fetch_earnings(client: &reqwest::Client, symbols: &[&str]) -> Vec<EarnEvent> {
     let mut set = tokio::task::JoinSet::new();
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
     for s in symbols {
@@ -412,7 +406,10 @@ async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, QuoteEr
         .await
         .map_err(|e| QuoteError::Network(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(QuoteError::Network(format!("HTTP {} for {url}", resp.status())));
+        return Err(QuoteError::Network(format!(
+            "HTTP {} for {url}",
+            resp.status()
+        )));
     }
     resp.text()
         .await
@@ -465,7 +462,9 @@ pub fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
 pub fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
         (Some(a), Some(b)) => a > b,
-        _ => latest.trim_start_matches('v') != current.trim_start_matches('v') && !latest.is_empty(),
+        _ => {
+            latest.trim_start_matches('v') != current.trim_start_matches('v') && !latest.is_empty()
+        }
     }
 }
 
@@ -476,7 +475,8 @@ pub async fn fetch_latest_release(
 ) -> Result<UpdateInfo, QuoteError> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let body = get_text(client, &url).await?;
-    let rel: GhRelease = serde_json::from_str(&body).map_err(|e| QuoteError::Parse(e.to_string()))?;
+    let rel: GhRelease =
+        serde_json::from_str(&body).map_err(|e| QuoteError::Parse(e.to_string()))?;
     let latest = rel.tag_name;
     Ok(UpdateInfo {
         newer: is_newer(&latest, current),

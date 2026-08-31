@@ -81,6 +81,20 @@ pub struct Trade {
     pub mae_source: Option<String>,
     pub post_exit_mfe: Option<f64>,
     pub checklist: Vec<CheckItem>,
+    #[serde(default)]
+    pub mfe_ticks: Option<f64>,
+    #[serde(default)]
+    pub mae_ticks: Option<f64>,
+    #[serde(default)]
+    pub mfe_r: Option<f64>,
+    #[serde(default)]
+    pub mae_r: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedView {
+    pub name: String,
+    pub filter: TradeFilter,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +179,22 @@ pub fn r_value(net_pnl: f64, initial_risk: Option<f64>) -> Option<f64> {
     initial_risk.filter(|r| *r > 1e-9).map(|r| net_pnl / r)
 }
 
+/// Fill MFE/MAE tick and R multiples from price excursion + contract spec.
+pub fn attach_excursion_units(t: &mut Trade) {
+    let ticks = |px: Option<f64>| match (px, t.tick_size) {
+        (Some(p), Some(sz)) if sz > 0.0 => Some(p / sz),
+        _ => None,
+    };
+    let as_r = |tk: Option<f64>| match (tk, t.currency_per_tick, t.initial_risk) {
+        (Some(k), Some(c), Some(r)) if r > 1e-9 => Some(k * c * t.qty.max(1.0) / r),
+        _ => None,
+    };
+    t.mfe_ticks = ticks(t.mfe);
+    t.mae_ticks = ticks(t.mae);
+    t.mfe_r = as_r(t.mfe_ticks);
+    t.mae_r = as_r(t.mae_ticks);
+}
+
 /// Scan Sierra `.scid` folders for MFE/MAE on one trade.
 pub fn scid_for_trade(t: &Trade, dirs: &[std::path::PathBuf]) -> Option<scid::MaeMfe> {
     if t.open_epoch_ms <= 0 {
@@ -209,6 +239,8 @@ mod tests {
         assert_eq!(t.fills.len(), 4);
         assert_eq!(t.currency_per_tick, Some(5.0));
         assert!(t.r_value.is_some());
+        assert!(t.mfe_ticks.is_some());
+        assert!(t.mfe_r.unwrap_or(0.0).abs() > 0.0);
         let mes = imported_to_trade(&rows[1], 8.0);
         assert_eq!(mes.symbol_root, "ES");
         assert!(mes.is_micro);
@@ -452,5 +484,29 @@ mod tests {
         assert_eq!(mc.runs, 64);
         assert!(mc.p95 >= mc.p50);
         assert!(mc.p50 >= mc.p05);
+        assert!(mc.dd_p05 <= mc.dd_p50);
+        assert!(mc.dd_p50 <= mc.dd_p95);
+        assert!(mc.p95 > mc.p05, "bootstrap ending R should vary");
+    }
+
+    #[test]
+    fn saved_view_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        j.save_view(&SavedView {
+            name: "NQ shorts".into(),
+            filter: TradeFilter {
+                roots: vec!["NQ".into()],
+                direction: Some("SHORT".into()),
+                closed_only: true,
+                ..TradeFilter::default()
+            },
+        })
+        .unwrap();
+        let views = j.list_views().unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].filter.roots, vec!["NQ".to_string()]);
+        j.delete_view("NQ shorts").unwrap();
+        assert!(j.list_views().unwrap().is_empty());
     }
 }

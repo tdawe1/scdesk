@@ -3,7 +3,8 @@
 use contracts::parse_symbol;
 
 use super::{
-    compute_risk, is_sim_account, r_value, trading_day, JournalError, Trade, DEFAULT_RISK_TICKS,
+    attach_excursion_units, compute_risk, is_sim_account, r_value, trading_day, JournalError,
+    Trade, DEFAULT_RISK_TICKS,
 };
 
 pub fn parse_tradeslist(text: &str) -> Result<Vec<Trade>, JournalError> {
@@ -74,7 +75,7 @@ pub fn parse_tradeslist(text: &str) -> Result<Vec<Trade>, JournalError> {
             direction,
             account
         );
-        out.push(Trade {
+        let mut t = Trade {
             id: id.clone(),
             source_id: id,
             is_sim: is_sim_account(&account),
@@ -120,7 +121,13 @@ pub fn parse_tradeslist(text: &str) -> Result<Vec<Trade>, JournalError> {
             currency_per_tick: cpt,
             source: "tradeslist".into(),
             fills: Vec::new(),
-        });
+            mfe_ticks: None,
+            mae_ticks: None,
+            mfe_r: None,
+            mae_r: None,
+        };
+        attach_excursion_units(&mut t);
+        out.push(t);
         let _ = n;
     }
     Ok(out)

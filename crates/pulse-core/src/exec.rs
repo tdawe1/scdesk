@@ -270,7 +270,10 @@ fn failed_break(bars: &[Bar]) -> Option<bool> {
     }
     let end = bars.len() - 1;
     let prior = &bars[end.saturating_sub(15)..end.saturating_sub(2)];
-    let ph = prior.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+    let ph = prior
+        .iter()
+        .map(|b| b.high)
+        .fold(f64::NEG_INFINITY, f64::max);
     let pl = prior.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
     let recent = &bars[end.saturating_sub(2)..=end];
     let last = bars[end].close;

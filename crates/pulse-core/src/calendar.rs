@@ -35,7 +35,8 @@ struct FfRow {
 }
 
 pub fn parse_ff_json(body: &str) -> Result<Vec<CalEvent>, QuoteError> {
-    let rows: Vec<FfRow> = serde_json::from_str(body).map_err(|e| QuoteError::Parse(e.to_string()))?;
+    let rows: Vec<FfRow> =
+        serde_json::from_str(body).map_err(|e| QuoteError::Parse(e.to_string()))?;
     let mut out = Vec::new();
     for r in rows {
         let ts = parse_event_ts(&r.date)?;

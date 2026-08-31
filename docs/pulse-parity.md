@@ -16,7 +16,7 @@ Independent implementation. Scores and layout are ours. This list is the public 
 | Trend MA stack, ADX, QQQ vs SPY, vs SMA200 | done |
 | Breadth % > SMA 20/50/200 (~51 names) | done |
 | Macro 10Y, DXY, FOMC/CPI/NFP, Fed stance | done |
-| Execution window, regime-adaptive, 5m VWAP (daily fallback) | done |
+| Execution window, regime-adaptive, 5m VWAP (20% of overlay; daily fallback) | done |
 | SPY 20d sector correlation heatmap | done |
 | Sector performance bars | done |
 | 6h score sparkline + trend arrow | done |
@@ -35,6 +35,6 @@ Independent implementation. Scores and layout are ours. This list is the public 
 | Windows-only installer / Authenticode | n/a (Linux-first) |
 | Pixel-clone UI / cloned weights | out of scope |
 
-Scoring is still ours (`scoring.toml` / `score.rs`). After reading their JS we took **shapes**, not tables: 90/10 execution overlay, YES needs a side, breadth U-curve, RSI chop floor, VVIX in vol, ADX ±10, SMA200 distance as a hill. 5m VWAP stays display-only.
+Scoring is still ours (`scoring.toml` / `score.rs`). After reading their JS we took **shapes**, not tables: 90/10 execution overlay, YES needs a side, breadth U-curve, RSI chop floor, VVIX in vol, ADX ±10, SMA200 distance as a hill. 5m VWAP is 20% of the execution overlay when 5m bars exist.
 
 Journal is a separate app (`docs/journal.md`), not part of this Pulse checklist.

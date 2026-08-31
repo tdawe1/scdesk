@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::bars::{
-    above_sma_frac, adx, closes, daily_returns, last_up, overlay_last_close, pct_change,
-    pearson, percentile_rank, rsi, sma, Bar,
+    above_sma_frac, adx, closes, daily_returns, last_up, overlay_last_close, pct_change, pearson,
+    percentile_rank, rsi, sma, Bar,
 };
 use crate::calendar::{days_to_next_macro, fetch_calendar, CalEvent};
 use crate::exec::{analyze_5m, analyze_daily, leaders_extend, ExecSnapshot};
@@ -381,12 +381,7 @@ impl PulseEngine {
         }
 
         if force || now - self.update_at > UPDATE_CACHE_SECS {
-            match fetch_latest_release(
-                yahoo.client(),
-                GITHUB_REPO,
-                env!("CARGO_PKG_VERSION"),
-            )
-            .await
+            match fetch_latest_release(yahoo.client(), GITHUB_REPO, env!("CARGO_PKG_VERSION")).await
             {
                 Ok(info) => {
                     self.update = Some(info);
@@ -397,8 +392,7 @@ impl PulseEngine {
         }
 
         if force || now - self.earnings_at > 12 * 3600 {
-            if let Some(disk) = load_json::<Vec<EarnEvent>>(&self.cache_dir.join("earnings.json"))
-            {
+            if let Some(disk) = load_json::<Vec<EarnEvent>>(&self.cache_dir.join("earnings.json")) {
                 if !force {
                     self.earnings = disk;
                     self.earnings_at = now;
@@ -659,7 +653,9 @@ impl PulseEngine {
         }
         let pre = self.settings.pre_event_alert_min as i64 * 60;
         if pre > 0 {
-            for e in cal.iter().filter(|e| e.is_macro && e.impact.eq_ignore_ascii_case("high"))
+            for e in cal
+                .iter()
+                .filter(|e| e.is_macro && e.impact.eq_ignore_ascii_case("high"))
             {
                 let until = e.ts - now;
                 if until > 0 && until <= pre {
@@ -684,7 +680,10 @@ impl PulseEngine {
                 }
             }
         }
-        for e in earnings.iter().filter(|e| e.ts - now > 0 && e.ts - now < 5 * 86400) {
+        for e in earnings
+            .iter()
+            .filter(|e| e.ts - now > 0 && e.ts - now < 5 * 86400)
+        {
             let key = format!("earn-{}", e.symbol);
             if self.alerted.insert(key) {
                 out.push(FiredAlert {
@@ -784,7 +783,10 @@ fn build_inputs(
     }
     let sector_spread_5d = if sector_rets.len() >= 2 {
         let min = sector_rets.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = sector_rets.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max = sector_rets
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         Some(max - min)
     } else {
         None
@@ -859,7 +861,10 @@ fn build_inputs(
         }
         let end = bars.len() - 1;
         let window = &bars[end.saturating_sub(13)..end.saturating_sub(2)];
-        let prior_high = window.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+        let prior_high = window
+            .iter()
+            .map(|b| b.high)
+            .fold(f64::NEG_INFINITY, f64::max);
         let prior_low = window.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
         let recent = &bars[end.saturating_sub(2)..=end];
         let broke_high = recent.iter().any(|b| b.high > prior_high);
@@ -924,13 +929,16 @@ fn build_inputs(
             let last = *c.last()?;
             percentile_rank(c, last).map(|p| 0.55 + p / 100.0 * 0.70)
         }),
-        vol_bias: match (vix_last, vix_c.as_ref().and_then(|c| {
-            if c.len() > 5 {
-                Some(c[c.len() - 1] - c[c.len() - 1 - 5])
-            } else {
-                None
-            }
-        })) {
+        vol_bias: match (
+            vix_last,
+            vix_c.as_ref().and_then(|c| {
+                if c.len() > 5 {
+                    Some(c[c.len() - 1] - c[c.len() - 1 - 5])
+                } else {
+                    None
+                }
+            }),
+        ) {
             (Some(v), Some(s)) if v < 14.0 && s < 0.3 => Some("Calm".into()),
             (_, Some(s)) if s > 1.0 => Some("Rising".into()),
             (Some(v), _) if v > 22.0 => Some("Elevated".into()),
@@ -984,39 +992,33 @@ fn build_inputs(
                 "Hold".into()
             })
         }),
-        bounce_fail: exec_5m
-            .and_then(|e| e.bounce_fail)
-            .or_else(|| {
-                spy.and_then(|bars| {
-                    let last = bars.last()?;
-                    let up_bar = last.close > last.open;
-                    let loc = (last.close - last.low) / (last.high - last.low).max(1e-9);
-                    let down = spy_ret20.unwrap_or(0.0) < 0.0;
-                    Some(down && up_bar && loc < 0.40)
-                })
-            }),
-        follow_through: exec_5m
-            .and_then(|e| e.follow_through)
-            .or(follow_through),
+        bounce_fail: exec_5m.and_then(|e| e.bounce_fail).or_else(|| {
+            spy.and_then(|bars| {
+                let last = bars.last()?;
+                let up_bar = last.close > last.open;
+                let loc = (last.close - last.low) / (last.high - last.low).max(1e-9);
+                let down = spy_ret20.unwrap_or(0.0) < 0.0;
+                Some(down && up_bar && loc < 0.40)
+            })
+        }),
+        follow_through: exec_5m.and_then(|e| e.follow_through).or(follow_through),
         close_loc: exec_5m.and_then(|e| e.close_loc).or(close_loc),
         failed_break: exec_5m.and_then(|e| e.failed_break).or(failed_break),
-        breakdowns_hold: exec_5m
-            .and_then(|e| e.breakdowns_hold)
-            .or_else(|| {
-                spy.and_then(|bars| {
-                    if bars.len() < 25 {
-                        return None;
-                    }
-                    let c = closes(bars);
-                    let s20 = sma(&c, 20)?;
-                    let last = *c.last()?;
-                    let down = spy_ret20.unwrap_or(0.0) < 0.0;
-                    if !down {
-                        return Some(false);
-                    }
-                    Some(last < s20)
-                })
-            }),
+        breakdowns_hold: exec_5m.and_then(|e| e.breakdowns_hold).or_else(|| {
+            spy.and_then(|bars| {
+                if bars.len() < 25 {
+                    return None;
+                }
+                let c = closes(bars);
+                let s20 = sma(&c, 20)?;
+                let last = *c.last()?;
+                let down = spy_ret20.unwrap_or(0.0) < 0.0;
+                if !down {
+                    return Some(false);
+                }
+                Some(last < s20)
+            })
+        }),
         skew: spots.and_then(|s| s.get("SKEW").map(|q| q.last)),
         vvix: spots.and_then(|s| s.get("VVIX").map(|q| q.last)),
         vix3m: spots.and_then(|s| s.get("VIX3M").map(|q| q.last)),

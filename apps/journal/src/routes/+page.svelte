@@ -17,7 +17,12 @@
     r_value: number | null;
     mfe: number | null;
     mae: number | null;
+    mfe_ticks?: number | null;
+    mae_ticks?: number | null;
+    mfe_r?: number | null;
+    mae_r?: number | null;
     duration_seconds: number | null;
+    open_epoch_ms?: number;
     open_datetime: string;
     close_datetime: string | null;
     trading_day: string;
@@ -56,7 +61,27 @@
   };
   type Eq = { ts: number; equity: number; r_equity: number };
   type Day = { date: string; pnl: number; r: number; trades: number };
-  type Mc = { runs: number; p05: number; p50: number; p95: number; mean: number };
+  type Mc = {
+    runs: number;
+    p05: number;
+    p50: number;
+    p95: number;
+    mean: number;
+    dd_p05?: number;
+    dd_p50?: number;
+    dd_p95?: number;
+  };
+  type SavedView = {
+    name: string;
+    filter: {
+      accounts: string[];
+      roots: string[];
+      direction: string | null;
+      exclude_sim: boolean;
+      closed_only: boolean;
+      query: string;
+    };
+  };
   type Settings = {
     exclude_sim: boolean;
     default_risk_ticks: number;
@@ -114,6 +139,8 @@
   let importing = $state(false);
   let tsvDraft = $state("");
   let shotUrls = $state<Record<string, string>>({});
+  let views = $state<SavedView[]>([]);
+  let viewName = $state("");
 
   const unit = $derived(settings?.unit === "R" ? "R" : "$");
   function money(n: number | null | undefined): string {
@@ -152,7 +179,7 @@
         direction: filter.direction || null,
         exclude_sim: settings?.exclude_sim ?? false,
       };
-      const [t, k, e, c, h, m, a, b, g, ddown, rh, sc, pr] = await Promise.all([
+      const [t, k, e, c, h, m, a, b, g, ddown, rh, sc, pr, vs] = await Promise.all([
         invoke<Trade[]>("list_trades", { filter: f }),
         invoke<Kpis>("kpis", { filter: f }),
         invoke<Eq[]>("equity", { filter: f }),
@@ -166,6 +193,7 @@
         invoke<[number, number][]>("r_hist", { filter: f }),
         invoke<[number, number, number][]>("mfe_mae", { filter: f }),
         invoke<Prop[]>("prop_tiles", { filter: f }),
+        invoke<SavedView[]>("list_views"),
       ]);
       trades = t;
       kpis = k;
@@ -180,6 +208,7 @@
       rhist = rh;
       scatter = sc;
       props = pr;
+      views = vs;
       void invoke("write_halt", { breaks: b });
       error = null;
     } catch (e) {
@@ -332,8 +361,9 @@
     await invoke("write_replay", {
       symbol: selected.symbol_raw,
       datetime: selected.open_datetime,
+      epochMs: selected.open_epoch_ms ?? 0,
     });
-    error = "wrote Data/scdesk/replay.json";
+    error = "wrote replay.json — ACSIL starts Sierra replay if enabled";
   }
 
   async function saveChecks() {
@@ -419,7 +449,7 @@
       await doImport();
     })();
     window.addEventListener("paste", onPaste);
-    const tick = setInterval(() => void doImport(true), 30_000);
+    const tick = setInterval(() => void doImport(true), 60_000);
     return () => {
       window.removeEventListener("paste", onPaste);
       clearInterval(tick);
@@ -477,12 +507,14 @@
     {/if}
     {#if mc}
       <section class="panel">
-        <h2>monte carlo (400 shuffles of R)</h2>
+        <h2>monte carlo (400 bootstrap paths of R)</h2>
         <div class="kpis">
-          <article><div class="k">p5</div><b>{mc.p05.toFixed(1)}R</b></article>
-          <article><div class="k">p50</div><b>{mc.p50.toFixed(1)}R</b></article>
-          <article><div class="k">p95</div><b>{mc.p95.toFixed(1)}R</b></article>
+          <article><div class="k">end p5</div><b>{mc.p05.toFixed(1)}R</b></article>
+          <article><div class="k">end p50</div><b>{mc.p50.toFixed(1)}R</b></article>
+          <article><div class="k">end p95</div><b>{mc.p95.toFixed(1)}R</b></article>
           <article><div class="k">mean</div><b>{mc.mean.toFixed(1)}R</b></article>
+          <article><div class="k">DD p5</div><b class="down">{(mc.dd_p05 ?? 0).toFixed(1)}R</b></article>
+          <article><div class="k">DD p50</div><b class="down">{(mc.dd_p50 ?? 0).toFixed(1)}R</b></article>
         </div>
       </section>
     {/if}
@@ -578,7 +610,9 @@
             <dt>stop</dt><dd>{selected.stop_price ?? "—"}</dd>
             <dt>net</dt><dd class={cls(selected.net_pnl)}>{money(selected.net_pnl)}</dd>
             <dt>R</dt><dd>{selected.r_value?.toFixed(2) ?? "—"}</dd>
-            <dt>MFE/MAE</dt><dd>{selected.mfe?.toFixed(2) ?? "—"} / {selected.mae?.toFixed(2) ?? "—"} {selected.mae_source ?? ""}</dd>
+            <dt>MFE/MAE</dt><dd>{selected.mfe?.toFixed(2) ?? "—"} / {selected.mae?.toFixed(2) ?? "—"} px {selected.mae_source ?? ""}</dd>
+            <dt>ticks</dt><dd>{selected.mfe_ticks?.toFixed(1) ?? "—"} / {selected.mae_ticks?.toFixed(1) ?? "—"}</dd>
+            <dt>MFE/MAE R</dt><dd>{selected.mfe_r?.toFixed(2) ?? "—"} / {selected.mae_r?.toFixed(2) ?? "—"}</dd>
             <dt>post MFE</dt><dd>{selected.post_exit_mfe?.toFixed(2) ?? "—"}</dd>
             <dt>dur</dt><dd>{selected.duration_seconds ?? "—"}s</dd>
           </dl>
@@ -699,8 +733,8 @@
 
   {#if tab === "edge"}
     <section class="panel">
-      <h2>saved view (edge)</h2>
-      <p class="muted">filter the table, then this tab restates the same KPIs for that slice.</p>
+      <h2>saved views (edge)</h2>
+      <p class="muted">set filters, name the slice, save. Apply a view to restated KPIs.</p>
       <div class="filters">
         <input placeholder="query" bind:value={filter.query} onchange={refresh} />
         <input
@@ -711,7 +745,52 @@
             void refresh();
           }}
         />
+        <select bind:value={filter.direction} onchange={refresh}>
+          <option value="">all</option>
+          <option value="LONG">LONG</option>
+          <option value="SHORT">SHORT</option>
+        </select>
+        <input placeholder="view name" bind:value={viewName} />
+        <button
+          onclick={async () => {
+            if (!viewName.trim()) return;
+            await invoke("save_view", {
+              view: {
+                name: viewName.trim(),
+                filter: { ...filter, direction: filter.direction || null },
+              },
+            });
+            viewName = "";
+            await refresh();
+          }}>save view</button
+        >
       </div>
+      {#if views.length}
+        <div class="row">
+          {#each views as v}
+            <button
+              class:on={false}
+              onclick={() => {
+                filter = {
+                  accounts: v.filter.accounts ?? [],
+                  roots: v.filter.roots ?? [],
+                  direction: v.filter.direction ?? "",
+                  exclude_sim: v.filter.exclude_sim,
+                  closed_only: v.filter.closed_only,
+                  query: v.filter.query ?? "",
+                };
+                void refresh();
+              }}>{v.name}</button
+            >
+            <button
+              onclick={async () => {
+                await invoke("delete_view", { name: v.name });
+                await refresh();
+              }}>×</button
+            >
+          {/each}
+        </div>
+      {/if}
       {#if kpis}
         <p>{kpis.trades} trades · PF {kpis.profit_factor.toFixed(2)} · win {kpis.win_rate.toFixed(1)}% · net {money(unit === "R" ? kpis.net_r : kpis.net_pnl)}</p>
       {/if}

@@ -6,8 +6,26 @@
 
 #include "sierrachart.h"
 #include <cstring>
+#include <cstdio>
 
 SCDLLName("scdesk journal fills")
+
+static void JsonString(const char* buf, const char* key, char* out, int cap)
+{
+    out[0] = 0;
+    const char* p = strstr(buf, key);
+    if (!p)
+        return;
+    p += strlen(key);
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    if (*p == '"')
+        ++p;
+    int n = 0;
+    while (*p && *p != '"' && n + 1 < cap)
+        out[n++] = *p++;
+    out[n] = 0;
+}
 
 static bool JsonFlagTrue(const char* buf, const char* key)
 {
@@ -78,6 +96,13 @@ SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
         sc.Input[0].SetYesNo(true);
         sc.Input[1].Name = "Send flatten to trade service";
         sc.Input[1].SetYesNo(true);
+        sc.Input[2].Name = "Flatten entire trade account";
+        sc.Input[2].SetYesNo(true);
+        sc.Input[3].Name = "Start chart replay from replay.json";
+        sc.Input[3].SetYesNo(true);
+        sc.Input[4].Name = "Replay speed";
+        sc.Input[4].SetFloat(1.0f);
+        sc.ReceiveNotificationsForChangesToOrdersPositionsForAnySymbol = 1;
         return;
     }
 
@@ -111,15 +136,39 @@ SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
         s_SCPositionData pos;
         sc.GetTradePosition(pos);
         int working = HasWorkingOrders(sc);
-        if ((pos.PositionQuantity != 0 || working > 0) && (flattenTick == 1 || flattenTick % 30 == 0))
+        int anyPos = pos.PositionQuantity != 0 || working > 0;
+        for (int i = 0; i < 64 && !anyPos; ++i)
         {
-            int ok = sc.FlattenAndCancelAllOrders();
+            s_SCPositionData p;
+            if (!sc.GetTradePositionByIndex(p, i))
+                break;
+            if (p.PositionQuantity != 0 || p.WorkingOrdersExist)
+                anyPos = 1;
+        }
+        if (anyPos && (flattenTick == 1 || flattenTick % 30 == 0))
+        {
+            int okChart = sc.FlattenAndCancelAllOrders();
+            int okAcct = 1;
+            if (sc.Input[2].GetYesNo())
+            {
+                okAcct = sc.FlattenPositionsAndCancelOrdersForTradeAccount(sc.SelectedTradeAccount);
+                for (int i = 0; i < 64; ++i)
+                {
+                    s_SCPositionData p;
+                    if (!sc.GetTradePositionByIndex(p, i))
+                        break;
+                    if (p.PositionQuantity == 0 && !p.WorkingOrdersExist)
+                        continue;
+                    sc.FlattenAndCancelAllOrdersForSymbolAndNonSimTradeAccount(p.Symbol, p.TradeAccount);
+                }
+            }
             SCString msg;
             msg.Format(
-                "scdesk: FlattenAndCancelAllOrders pos=%g working=%d result=%d",
+                "scdesk: flatten chart=%d account=%d pos=%g working=%d",
+                okChart,
+                okAcct,
                 pos.PositionQuantity,
-                working,
-                ok);
+                working);
             sc.AddMessageToLog(msg, 1);
         }
     }
@@ -132,9 +181,47 @@ SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
         if ((int)h != replaySeen)
         {
             replaySeen = (int)h;
-            sc.AddMessageToLog(
-                "scdesk: replay.json updated — start Sierra replay at the datetime in Data/scdesk/replay.json",
-                0);
+            if (sc.Input[3].GetYesNo())
+            {
+                char dtbuf[64];
+                char symbuf[64];
+                JsonString(sidecar, "\"datetime\":", dtbuf, sizeof(dtbuf));
+                JsonString(sidecar, "\"symbol\":", symbuf, sizeof(symbuf));
+                SCDateTime start;
+                int y = 0, mo = 0, d = 0, hh = 0, mm = 0, ss = 0;
+                if (sscanf(dtbuf, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &hh, &mm, &ss) == 6
+                    || sscanf(dtbuf, "%d-%d-%d %d:%d:%d", &y, &mo, &d, &hh, &mm, &ss) == 6)
+                    start.SetDateTimeYMDHMS(y, mo, d, hh, mm, ss);
+                int chart = sc.ChartNumber;
+                if (symbuf[0])
+                {
+                    for (int c = 1; c <= 200; ++c)
+                    {
+                        SCString cs = sc.GetChartSymbol(c);
+                        if (cs.GetLength() && strstr(cs.GetChars(), symbuf))
+                        {
+                            chart = c;
+                            break;
+                        }
+                    }
+                }
+                n_ACSIL::s_ChartReplayParameters rp;
+                rp.ChartNumber = chart;
+                rp.ReplaySpeed = sc.Input[4].GetFloat();
+                rp.StartDateTime = start;
+                rp.ChartsToReplay = n_ACSIL::CHARTS_TO_REPLAY_ALL_CHARTS_IN_CHARTBOOK;
+                rp.ClearExistingTradeSimulationDataForSymbolAndTradeAccount = 0;
+                int ok = sc.StartChartReplayNew(rp);
+                if (!ok)
+                    ok = sc.StartChartReplay(chart, sc.Input[4].GetFloat(), start);
+                SCString msg;
+                msg.Format("scdesk: StartChartReplay chart=%d result=%d %s", chart, ok, dtbuf);
+                sc.AddMessageToLog(msg, 0);
+            }
+            else
+                sc.AddMessageToLog(
+                    "scdesk: replay.json updated — enable 'Start chart replay' or start Sierra replay manually",
+                    0);
         }
     }
 

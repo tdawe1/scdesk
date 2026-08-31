@@ -4,7 +4,10 @@ use serde::Deserialize;
 
 use contracts::parse_symbol;
 
-use super::{compute_risk, is_sim_account, r_value, trading_day, Fill, JournalError, Trade};
+use super::{
+    attach_excursion_units, compute_risk, is_sim_account, r_value, trading_day, Fill, JournalError,
+    Trade,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcsilFill {
@@ -123,7 +126,7 @@ fn close_group(buf: &[&AcsilFill], default_risk_ticks: f64) -> Option<Trade> {
         direction,
         first.account.replace([' ', '/'], "_")
     );
-    Some(Trade {
+    let mut t = Trade {
         id: id.clone(),
         source_id: id,
         account: if first.account.is_empty() {
@@ -184,7 +187,13 @@ fn close_group(buf: &[&AcsilFill], default_risk_ticks: f64) -> Option<Trade> {
         mae_source: None,
         post_exit_mfe: None,
         checklist: Vec::new(),
-    })
+        mfe_ticks: None,
+        mae_ticks: None,
+        mfe_r: None,
+        mae_r: None,
+    };
+    attach_excursion_units(&mut t);
+    Some(t)
 }
 
 fn signed_qty(f: &AcsilFill) -> f64 {

@@ -544,11 +544,7 @@ fn momentum(i: &ScoreInputs) -> (f64, Vec<Metric>) {
         metric("RSI 14", fmt_opt(i.rsi14, 1), "chop near 50 is weak"),
         metric("5d %", fmt_signed(i.ret5), "abs; 1% already counts"),
         metric("20d %", fmt_signed(i.ret20), "abs; 2% already counts"),
-        metric(
-            "est. put/call",
-            fmt_opt(pcr, 2),
-            "from VIX, 10% of pillar",
-        ),
+        metric("est. put/call", fmt_opt(pcr, 2), "from VIX, 10% of pillar"),
         metric(
             "sector spread 5d",
             fmt_opt(i.sector_spread_5d, 2),
@@ -675,7 +671,11 @@ fn breadth(i: &ScoreInputs) -> (f64, Vec<Metric>) {
             "50% is chop (~30), not zero",
         ),
         metric("% > SMA50", fmt_opt(i.pct_above_sma50, 0), ""),
-        metric("% > SMA200", fmt_opt(i.pct_above_sma200, 0), "40% of pillar"),
+        metric(
+            "% > SMA200",
+            fmt_opt(i.pct_above_sma200, 0),
+            "40% of pillar",
+        ),
     ];
     (score, metrics)
 }
@@ -758,14 +758,19 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
         .map(|r| r.clamp(-5.0, 5.0))
         .collect();
     if rets.len() < 4 {
+        let vq = vwap_quality(i);
         return (
-            missing(),
+            vq.unwrap_or_else(missing),
             vec![
                 metric("sectors", "n/a".into(), "need GICS 5d returns"),
                 metric(
                     "vs VWAP",
                     i.vs_vwap.clone().unwrap_or_else(|| "n/a".into()),
-                    "5m panel, not in this overlay",
+                    if vq.is_some() {
+                        "20% of overlay when 5m"
+                    } else {
+                        "need 5m vs VWAP"
+                    },
                 ),
             ],
         );
@@ -781,15 +786,30 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
 
     let (score, m1, m2, m3, m4) = if bear {
         let pct_neg = neg as f64 / n * 100.0;
-        let breakdowns = interp(pct_neg, &[[30.0, 22.0], [50.0, 50.0], [70.0, 82.0], [90.0, 95.0]]);
+        let breakdowns = interp(
+            pct_neg,
+            &[[30.0, 22.0], [50.0, 50.0], [70.0, 82.0], [90.0, 95.0]],
+        );
         let avg_bot = sorted[..k].iter().sum::<f64>() / k as f64;
-        let laggards = interp(avg_bot, &[[-4.0, 94.0], [-2.0, 72.0], [-1.0, 50.0], [0.0, 18.0]]);
+        let laggards = interp(
+            avg_bot,
+            &[[-4.0, 94.0], [-2.0, 72.0], [-1.0, 50.0], [0.0, 18.0]],
+        );
         let small = rets.iter().filter(|v| **v > 0.0 && **v < 0.5).count() as f64;
         let big = rets.iter().filter(|v| **v >= 0.5).count() as f64;
         let bounce = if big > 0.0 { small / big } else { 0.0 };
-        let bounce_s = interp(bounce, &[[0.0, 88.0], [0.5, 58.0], [1.0, 38.0], [2.0, 18.0]]);
-        let ft = interp(spy5, &[[-5.0, 94.0], [-2.0, 70.0], [0.0, 32.0], [1.5, 16.0]]);
-        let s = 0.25 * breakdowns + 0.25 * laggards + 0.25 * bounce_s + 0.25 * ft;
+        let bounce_s = interp(
+            bounce,
+            &[[0.0, 88.0], [0.5, 58.0], [1.0, 38.0], [2.0, 18.0]],
+        );
+        let ft = interp(
+            spy5,
+            &[[-5.0, 94.0], [-2.0, 70.0], [0.0, 32.0], [1.5, 16.0]],
+        );
+        let mut s = 0.25 * breakdowns + 0.25 * laggards + 0.25 * bounce_s + 0.25 * ft;
+        if let Some(v) = vwap_quality(i) {
+            s = 0.80 * s + 0.20 * v;
+        }
         (
             s,
             metric(
@@ -811,15 +831,33 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
         )
     } else {
         let pct_pos = pos as f64 / n * 100.0;
-        let breakouts = interp(pct_pos, &[[30.0, 22.0], [50.0, 50.0], [70.0, 82.0], [90.0, 95.0]]);
+        let breakouts = interp(
+            pct_pos,
+            &[[30.0, 22.0], [50.0, 50.0], [70.0, 82.0], [90.0, 95.0]],
+        );
         let avg_top = sorted[sorted.len() - k..].iter().sum::<f64>() / k as f64;
-        let leaders = interp(avg_top, &[[0.0, 16.0], [0.8, 48.0], [2.0, 74.0], [4.0, 94.0]]);
+        let leaders = interp(
+            avg_top,
+            &[[0.0, 16.0], [0.8, 48.0], [2.0, 74.0], [4.0, 94.0]],
+        );
         let small = rets.iter().filter(|v| **v < 0.0 && **v > -0.5).count() as f64;
         let big = rets.iter().filter(|v| **v <= -0.5).count() as f64;
         let dip = if big > 0.0 { small / big } else { 0.0 };
         let dip_s = interp(dip, &[[0.0, 14.0], [0.5, 42.0], [1.0, 62.0], [2.5, 88.0]]);
-        let ft = interp(spy5, &[[-1.0, 16.0], [0.0, 32.0], [1.5, 62.0], [3.0, 84.0], [5.0, 94.0]]);
-        let s = 0.25 * breakouts + 0.25 * leaders + 0.25 * dip_s + 0.25 * ft;
+        let ft = interp(
+            spy5,
+            &[
+                [-1.0, 16.0],
+                [0.0, 32.0],
+                [1.5, 62.0],
+                [3.0, 84.0],
+                [5.0, 94.0],
+            ],
+        );
+        let mut s = 0.25 * breakouts + 0.25 * leaders + 0.25 * dip_s + 0.25 * ft;
+        if let Some(v) = vwap_quality(i) {
+            s = 0.80 * s + 0.20 * v;
+        }
         (
             s,
             metric(
@@ -827,11 +865,7 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
                 format!("{pct_pos:.0}% pos"),
                 "share of sectors up",
             ),
-            metric(
-                "leaders avg",
-                format!("{avg_top:+.2}%"),
-                "top 3 sectors 5d",
-            ),
+            metric("leaders avg", format!("{avg_top:+.2}%"), "top 3 sectors 5d"),
             metric("dip ratio", format!("{dip:.2}"), "small dips vs dumps"),
             metric("follow-through", fmt_signed(i.ret5), "SPY 5d, bull curve"),
         )
@@ -850,17 +884,40 @@ fn execution(i: &ScoreInputs) -> (f64, Vec<Metric>) {
         metric(
             "vs VWAP",
             i.vs_vwap.clone().unwrap_or_else(|| "n/a".into()),
-            "5m panel, not this overlay",
+            if vwap_quality(i).is_some() {
+                "20% of overlay (ADX vs location)"
+            } else {
+                "need 5m bars"
+            },
         ),
     ];
     if i.exec_source.is_some() {
         metrics.push(metric(
             "5m source",
             i.exec_source.clone().unwrap_or_else(|| "n/a".into()),
-            "display only",
+            "feeds vs VWAP overlay",
         ));
     }
     (score, metrics)
+}
+
+/// Direction-agnostic: chop wants VWAP, trend wants a side.
+fn vwap_quality(i: &ScoreInputs) -> Option<f64> {
+    if i.exec_source.as_deref() != Some("5m") {
+        return None;
+    }
+    let vs = i.vs_vwap.as_deref()?;
+    if vs == "n/a" {
+        return None;
+    }
+    let trend = i.adx14.map(|a| a >= 25.0).unwrap_or(false);
+    Some(match (vs, trend) {
+        ("at", false) => 72.0,
+        ("at", true) => 48.0,
+        ("above" | "below", true) => 80.0,
+        ("above" | "below", false) => 42.0,
+        _ => 50.0,
+    })
 }
 
 fn bias(i: &ScoreInputs) -> Bias {
@@ -1007,7 +1064,9 @@ mod tests {
         up.qqq_close = Some(80.0);
         up.qqq_sma50 = Some(90.0);
         up.qqq_sma200 = Some(100.0);
-        up.sector_rets_5d = vec![-1.2, -0.8, -1.5, -0.4, -0.9, -1.1, -0.3, -0.6, 0.2, -0.5, -0.7];
+        up.sector_rets_5d = vec![
+            -1.2, -0.8, -1.5, -0.4, -0.9, -1.1, -0.3, -0.6, 0.2, -0.5, -0.7,
+        ];
         let b = score(&up, &cfg, Mode::Day);
         assert!(a.composite >= 80.0, "{}", a.composite);
         assert!(b.composite >= 80.0, "{}", b.composite);
@@ -1016,6 +1075,34 @@ mod tests {
         assert_eq!(a.decision, Decision::Yes);
         assert_eq!(b.decision, Decision::Yes);
         assert!((a.composite - b.composite).abs() < 12.0);
+    }
+
+    #[test]
+    fn five_min_vwap_moves_execution_overlay() {
+        let mut i = ScoreInputs {
+            sector_rets_5d: vec![1.0, 0.8, 1.2, 0.4, 0.9, 1.1, 0.3, 0.6, 0.2, 0.5, 0.7],
+            ret5: Some(1.5),
+            adx14: Some(12.0),
+            exec_source: Some("5m".into()),
+            vs_vwap: Some("at".into()),
+            ..ScoreInputs::default()
+        };
+        let cfg = ScoreConfig::default();
+        let chop_at = score(&i, &cfg, Mode::Day)
+            .pillars
+            .iter()
+            .find(|p| p.id == "execution")
+            .unwrap()
+            .score;
+        i.vs_vwap = Some("above".into());
+        i.adx14 = Some(30.0);
+        let trend_ext = score(&i, &cfg, Mode::Day)
+            .pillars
+            .iter()
+            .find(|p| p.id == "execution")
+            .unwrap()
+            .score;
+        assert!(trend_ext > chop_at, "{trend_ext} vs {chop_at}");
     }
 
     #[test]

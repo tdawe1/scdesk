@@ -46,6 +46,12 @@ pub struct MonteCarlo {
     pub p50: f64,
     pub p95: f64,
     pub mean: f64,
+    #[serde(default)]
+    pub dd_p05: f64,
+    #[serde(default)]
+    pub dd_p50: f64,
+    #[serde(default)]
+    pub dd_p95: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +198,8 @@ pub fn calendar(trades: &[Trade]) -> Vec<CalendarDay> {
     map.into_values().collect()
 }
 
-/// Shuffle R multiples `runs` times; report ending-equity percentiles.
+/// Bootstrap (sample with replacement) the R sequence.
+/// Ending equity and path max-drawdown both vary across runs.
 pub fn monte_carlo(trades: &[Trade], runs: usize) -> MonteCarlo {
     let rs: Vec<f64> = trades
         .iter()
@@ -206,32 +213,50 @@ pub fn monte_carlo(trades: &[Trade], runs: usize) -> MonteCarlo {
             p50: 0.0,
             p95: 0.0,
             mean: 0.0,
+            dd_p05: 0.0,
+            dd_p50: 0.0,
+            dd_p95: 0.0,
         };
     }
+    let n = rs.len();
     let mut endings = Vec::with_capacity(runs);
-    let mut state: u64 = 0xC0FFEE ^ rs.len() as u64;
+    let mut dds = Vec::with_capacity(runs);
+    let mut state: u64 = 0xC0FFEE ^ n as u64;
     for _ in 0..runs {
-        let mut bag = rs.clone();
-        // Fisher–Yates with a tiny LCG so tests are deterministic.
-        for i in (1..bag.len()).rev() {
+        let mut eq = 0.0;
+        let mut peak = 0.0;
+        let mut dd = 0.0;
+        for _ in 0..n {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let j = (state as usize) % (i + 1);
-            bag.swap(i, j);
+            let r = rs[((state >> 33) as usize) % n];
+            eq += r;
+            if eq > peak {
+                peak = eq;
+            }
+            let d = eq - peak;
+            if d < dd {
+                dd = d;
+            }
         }
-        endings.push(bag.iter().sum::<f64>());
+        endings.push(eq);
+        dds.push(dd);
     }
     endings.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let pick = |p: f64| {
-        let i = ((p / 100.0) * (endings.len() as f64 - 1.0)).round() as usize;
-        endings[i.min(endings.len() - 1)]
+    dds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pick = |xs: &[f64], p: f64| {
+        let i = ((p / 100.0) * (xs.len() as f64 - 1.0)).round() as usize;
+        xs[i.min(xs.len() - 1)]
     };
     let mean = endings.iter().sum::<f64>() / endings.len() as f64;
     MonteCarlo {
         runs,
-        p05: pick(5.0),
-        p50: pick(50.0),
-        p95: pick(95.0),
+        p05: pick(&endings, 5.0),
+        p50: pick(&endings, 50.0),
+        p95: pick(&endings, 95.0),
         mean,
+        dd_p05: pick(&dds, 5.0),
+        dd_p50: pick(&dds, 50.0),
+        dd_p95: pick(&dds, 95.0),
     }
 }
 

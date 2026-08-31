@@ -23,6 +23,8 @@ If a DAY/SWING table does not sum to 1.0 the engine renormalizes the five pillar
 
 Displayed pillar weights on the dashboard are the **effective** composite weights (DAY/SWING × 0.90, execution 0.10).
 
+When 5-minute SPY bars exist, **vs VWAP** is 20% of the execution overlay (chop wants VWAP; trend wants a side). Daily fallback leaves that 20% out.
+
 ## Decision and size
 
 | Composite | Bias | Decision | Size |

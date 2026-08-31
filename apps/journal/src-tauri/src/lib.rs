@@ -1,15 +1,15 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use journal_core::{
     scid_for_trade, CheckItem, Journal, Kpis, MonteCarlo, PropSnapshot, PropSpec, RuleBreak, Rules,
-    Session, Shot, Trade, TradeFilter,
+    SavedView, Session, Shot, Trade, TradeFilter,
 };
 use serde::{Deserialize, Serialize};
 use sierra_paths::{discover_from_os, Discovery};
 
 struct AppState {
-    journal: Mutex<Journal>,
+    journal: Arc<Mutex<Journal>>,
     settings: Mutex<AppSettings>,
     settings_path: PathBuf,
 }
@@ -151,12 +151,10 @@ fn save_settings(
     Ok(settings)
 }
 
-#[tauri::command]
-fn import_journal(state: tauri::State<AppState>) -> Result<usize, String> {
+fn import_discovered(j: &Journal) -> Result<usize, String> {
     let disc = discover_from_os();
     let mut n = 0;
-    let j = state.journal.lock().map_err(|e| e.to_string())?;
-    if let Some(p) = disc.primary {
+    if let Some(p) = &disc.primary {
         n += j
             .import_ndjson_dir(&p.journal_dir)
             .map_err(|e| e.to_string())?;
@@ -165,7 +163,7 @@ fn import_journal(state: tauri::State<AppState>) -> Result<usize, String> {
             .import_screenshots_dir(&p.journal_dir.join("screenshots"))
             .map_err(|e| e.to_string())?;
     }
-    for extra in disc.extras {
+    for extra in &disc.extras {
         n += j
             .import_ndjson_dir(&extra.journal_dir)
             .map_err(|e| e.to_string())?;
@@ -177,6 +175,12 @@ fn import_journal(state: tauri::State<AppState>) -> Result<usize, String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(n)
+}
+
+#[tauri::command]
+fn import_journal(state: tauri::State<AppState>) -> Result<usize, String> {
+    let j = state.journal.lock().map_err(|e| e.to_string())?;
+    import_discovered(&j)
 }
 
 #[tauri::command]
@@ -574,6 +578,83 @@ fn delete_prop(state: tauri::State<AppState>, account: String) -> Result<(), Str
 }
 
 #[tauri::command]
+fn list_views(state: tauri::State<AppState>) -> Result<Vec<SavedView>, String> {
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .list_views()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_view(state: tauri::State<AppState>, view: SavedView) -> Result<(), String> {
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .save_view(&view)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_view(state: tauri::State<AppState>, name: String) -> Result<(), String> {
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .delete_view(&name)
+        .map_err(|e| e.to_string())
+}
+
+fn spawn_journal_watch(journal: Arc<Mutex<Journal>>) {
+    let _ = std::thread::Builder::new()
+        .name("scdesk-journal-watch".into())
+        .spawn(move || {
+            use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+            let disc = discover_from_os();
+            let mut roots = Vec::new();
+            if let Some(p) = &disc.primary {
+                roots.push(p.journal_dir.clone());
+                roots.push(p.data_dir.join("scdesk"));
+                roots.push(p.journal_dir.join("screenshots"));
+            }
+            for extra in &disc.extras {
+                roots.push(extra.journal_dir.clone());
+                roots.push(extra.data_dir.join("scdesk"));
+            }
+            for r in &roots {
+                let _ = std::fs::create_dir_all(r);
+                let _ = watcher.watch(r, RecursiveMode::Recursive);
+            }
+            if roots.is_empty() {
+                return;
+            }
+            loop {
+                if rx.recv().is_err() {
+                    return;
+                }
+                loop {
+                    match rx.recv_timeout(std::time::Duration::from_millis(800)) {
+                        Ok(_) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                if let Ok(j) = journal.lock() {
+                    let _ = import_discovered(&j);
+                    let _ = j.scan_missing_scid(&scid_dirs(), 40);
+                }
+            }
+        });
+}
+
+#[tauri::command]
 fn write_halt(breaks: Vec<RuleBreak>) -> Result<(), String> {
     let disc = discover_from_os();
     let halt = serde_json::json!({
@@ -599,9 +680,15 @@ fn write_halt(breaks: Vec<RuleBreak>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn write_replay(symbol: String, datetime: String) -> Result<(), String> {
+fn write_replay(symbol: String, datetime: String, epoch_ms: Option<i64>) -> Result<(), String> {
     let disc = discover_from_os();
-    let body = serde_json::json!({"action":"replay","symbol": symbol, "datetime": datetime});
+    let body = serde_json::json!({
+        "action": "replay",
+        "symbol": symbol,
+        "datetime": datetime,
+        "epochMs": epoch_ms.unwrap_or(0),
+        "speed": 1.0
+    });
     if let Some(r) = disc.primary {
         let p = r.data_dir.join("scdesk");
         let _ = std::fs::create_dir_all(&p);
@@ -632,10 +719,12 @@ pub fn run() {
         let _ = journal.import_screenshots_dir(&extra.journal_dir.join("screenshots"));
     }
     let _ = journal.scan_missing_scid(&scid_dirs(), 80);
+    let journal = Arc::new(Mutex::new(journal));
+    spawn_journal_watch(Arc::clone(&journal));
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
-            journal: Mutex::new(journal),
+            journal,
             settings: Mutex::new(settings),
             settings_path,
         })
@@ -673,6 +762,9 @@ pub fn run() {
             shot_data,
             export_csv,
             delete_prop,
+            list_views,
+            save_view,
+            delete_view,
             write_halt,
             write_replay
         ])

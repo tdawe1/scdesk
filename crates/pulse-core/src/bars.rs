@@ -156,7 +156,10 @@ pub fn adx(bars: &[Bar], n: usize) -> Option<f64> {
 }
 
 pub fn daily_returns(closes: &[f64]) -> Vec<f64> {
-    closes.windows(2).map(|w| (w[1] - w[0]) / w[0].max(1e-9)).collect()
+    closes
+        .windows(2)
+        .map(|w| (w[1] - w[0]) / w[0].max(1e-9))
+        .collect()
 }
 
 pub fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {

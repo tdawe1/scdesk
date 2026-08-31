@@ -11,8 +11,8 @@ use super::stats::{
     PropSnapshot, PropSpec, RuleBreak, Rules,
 };
 use super::{
-    fills_to_trades, parse_fills_text, parse_ndjson_text, parse_tradeslist, CheckItem,
-    JournalError, Session, Shot, Trade, TradeFilter, DEFAULT_RISK_TICKS,
+    attach_excursion_units, fills_to_trades, parse_fills_text, parse_ndjson_text, parse_tradeslist,
+    CheckItem, JournalError, SavedView, Session, Shot, Trade, TradeFilter, DEFAULT_RISK_TICKS,
 };
 
 pub struct Journal {
@@ -89,6 +89,10 @@ impl Journal {
                 dd_type TEXT NOT NULL DEFAULT 'static',
                 dd_value REAL NOT NULL DEFAULT 0,
                 profit_target REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS saved_views (
+                name TEXT PRIMARY KEY,
+                filter TEXT NOT NULL
             );
             "#,
         )?;
@@ -369,7 +373,7 @@ impl Journal {
         let shots: String = row.get(29)?;
         let mae_source: Option<String> = row.get(34).ok().flatten();
         let post_exit_mfe: Option<f64> = row.get(35).ok().flatten();
-        Ok(Trade {
+        let mut t = Trade {
             id: row.get(0)?,
             source_id: row.get(1)?,
             account: row.get(2)?,
@@ -407,7 +411,13 @@ impl Journal {
             mae_source,
             post_exit_mfe,
             checklist: Vec::new(),
-        })
+            mfe_ticks: None,
+            mae_ticks: None,
+            mfe_r: None,
+            mae_r: None,
+        };
+        attach_excursion_units(&mut t);
+        Ok(t)
     }
 
     pub fn list_trades(&self, f: &TradeFilter) -> Result<Vec<Trade>, JournalError> {
@@ -659,6 +669,42 @@ impl Journal {
             }
         }
         Ok(n)
+    }
+
+    pub fn save_view(&self, view: &SavedView) -> Result<(), JournalError> {
+        self.conn.execute(
+            "INSERT INTO saved_views(name, filter) VALUES(?1,?2)
+             ON CONFLICT(name) DO UPDATE SET filter=excluded.filter",
+            params![view.name, serde_json::to_string(&view.filter)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_views(&self) -> Result<Vec<SavedView>, JournalError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, filter FROM saved_views ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            let name: String = r.get(0)?;
+            let raw: String = r.get(1)?;
+            Ok((name, raw))
+        })?;
+        let mut out = Vec::new();
+        for row in rows.flatten() {
+            if let Ok(filter) = serde_json::from_str(&row.1) {
+                out.push(SavedView {
+                    name: row.0,
+                    filter,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn delete_view(&self, name: &str) -> Result<(), JournalError> {
+        self.conn
+            .execute("DELETE FROM saved_views WHERE name=?1", params![name])?;
+        Ok(())
     }
 }
 

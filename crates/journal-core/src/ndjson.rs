@@ -5,8 +5,8 @@ use serde::Deserialize;
 use contracts::parse_symbol;
 
 use super::{
-    compute_risk, is_sim_account, r_value, trading_day, Fill, JournalError, Trade,
-    DEFAULT_RISK_TICKS,
+    attach_excursion_units, compute_risk, is_sim_account, r_value, trading_day, Fill, JournalError,
+    Trade, DEFAULT_RISK_TICKS,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,7 +115,7 @@ pub fn imported_to_trade(raw: &ImportedTrade, default_risk_ticks: f64) -> Trade 
     } else {
         "LONG"
     };
-    Trade {
+    let mut t = Trade {
         id: raw.id.clone(),
         source_id: raw.id.clone(),
         account: if raw.account.is_empty() {
@@ -166,5 +166,11 @@ pub fn imported_to_trade(raw: &ImportedTrade, default_risk_ticks: f64) -> Trade 
                 side: f.side.clone(),
             })
             .collect(),
-    }
+        mfe_ticks: None,
+        mae_ticks: None,
+        mfe_r: None,
+        mae_r: None,
+    };
+    attach_excursion_units(&mut t);
+    t
 }

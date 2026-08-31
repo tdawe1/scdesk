@@ -489,11 +489,12 @@
 
   {#if dash?.update?.newer}
     <div class="banner orange">
-      update {dash.update.latest} available (you have {dash.update.current})
+      Pulse {dash.update.latest} is on GitHub (you have {dash.update.current}). It does not auto-install —
+      download the release asset and replace the binary.
       <button
         type="button"
         onclick={() => dash?.update?.url && openUrl(dash.update.url)}
-      >open release</button>
+      >open GitHub release</button>
     </div>
   {/if}
 
