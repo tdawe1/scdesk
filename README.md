@@ -12,11 +12,15 @@ A 0–100 quality score (volatility, momentum, trend, breadth, macro, plus a sma
 
 Also on the board: SPY/QQQ/VIX tape, VIX/SKEW/VVIX, breadth, a sector heatmap, the economic calendar, and desktop alerts. Put/call is estimated from VIX because Yahoo does not publish CBOE equity PCR.
 
+From the repo root:
+
 ```bash
-cd apps/pulse && npm install && npm run tauri dev
+./launch pulse
 ```
 
-That starts the Vite UI on `127.0.0.1:1420` and the desktop window. A debug `cargo run` of the binary alone will show “can’t connect to localhost” because the UI server is not running.
+(`npm run pulse` does the same.) First run installs npm deps if needed. The UI is `127.0.0.1:1420`. Do not `cargo run` the binary by itself — there is no UI server then.
+
+`./launch` with no args asks which app. `./launch install` puts Pulse and Journal in the desktop app menu.
 
 Keys: `D` / `S` day vs swing, `Ctrl+R` refresh, `T` always on top, `Delete` minimize.
 
@@ -30,15 +34,15 @@ Trades land in `~/.local/share/scdesk/journal.sqlite`. On launch (and when Sierr
 - `Data/scdesk/fills.ndjson` from our ACSIL study
 - Sierra TradesList TSV if you paste it in Settings
 
-You get a dashboard (P&L, win rate, equity, Monte Carlo on R), the trade list with notes/tags/screenshots, calendar, gallery, session diary, and daily risk rules. R is net P&amp;L over initial risk (stop if you had one, otherwise the default tick risk in Settings).
+You get a dashboard (P&L, win rate, equity, Monte Carlo on R), the trade list with notes/tags/screenshots, calendar, gallery, session diary, and daily risk rules. R is net P&L over initial risk (stop if you had one, otherwise the default tick risk in Settings).
 
 MFE/MAE can be filled from the matching `.scid` in `Data/`. If you blow a daily rule or a prop-firm floor, Journal writes `Data/scdesk/tm_halt.json`. Rebuild `acsil/scdesk_journal.cpp` inside Sierra if you want that file to flatten the account or to start a chart replay from `replay.json`.
 
 ```bash
-cd apps/journal && npm install && npm run tauri dev
+./launch journal
 ```
 
-Journal’s UI is `127.0.0.1:1430`. Same rule: use `tauri dev` (or `tauri build`), not a bare `cargo run`.
+Journal’s UI is `127.0.0.1:1430`.
 
 Settings can copy the sqlite file to `~/.local/share/scdesk/backups/`.
 
@@ -61,7 +65,7 @@ Rust 1.85+, Node 20+, GTK 3 and webkit2gtk 4.1.
 cargo test --workspace --exclude scdesk-pulse --exclude scdesk-journal
 ```
 
-The two `cd apps/… && npm run tauri dev` commands above are the usual way to run the UIs. Packaging a `.deb` is `npm run tauri build` in each app directory (still Linux).
+Packaging a `.deb` is `npm run tauri build` inside `apps/pulse` or `apps/journal`.
 
 ## Docs
 

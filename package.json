@@ -1,0 +1,10 @@
+{
+  "name": "scdesk",
+  "private": true,
+  "description": "Launcher scripts for Pulse and Journal",
+  "scripts": {
+    "start": "./launch",
+    "pulse": "./launch pulse",
+    "journal": "./launch journal"
+  }
+}

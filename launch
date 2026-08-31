@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Start Pulse or Journal from the repo root (tauri dev).
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")" && pwd)
+app=${1:-}
+
+usage() {
+  echo "usage: $0 [pulse|journal|install]" >&2
+  echo "  pulse     start Pulse" >&2
+  echo "  journal   start Journal" >&2
+  echo "  install   add app-menu entries (~/.local/share/applications)" >&2
+  exit 1
+}
+
+pick() {
+  if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v zenity >/dev/null 2>&1; then
+    app=$(zenity --list --title=scdesk --text="Start" --column=App Pulse Journal) || exit 1
+    app=${app,,}
+    return
+  fi
+  echo "1) Pulse"
+  echo "2) Journal"
+  read -r -p "launch: " n
+  case $n in
+    1|p|P|pulse|Pulse) app=pulse ;;
+    2|j|J|journal|Journal) app=journal ;;
+    *) echo "unknown" >&2; exit 1 ;;
+  esac
+}
+
+install_desktop() {
+  local dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  mkdir -p "$dir"
+  local icon_pulse="$root/apps/pulse/src-tauri/icons/128x128.png"
+  local icon_journal="$root/apps/journal/src-tauri/icons/128x128.png"
+  cat >"$dir/scdesk-pulse.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=scdesk Pulse
+Comment=ES/NQ quality dashboard
+Exec=$root/launch pulse
+Path=$root
+Icon=$icon_pulse
+Terminal=true
+Categories=Office;Finance;
+EOF
+  cat >"$dir/scdesk-journal.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=scdesk Journal
+Comment=Sierra Chart trade journal
+Exec=$root/launch journal
+Path=$root
+Icon=$icon_journal
+Terminal=true
+Categories=Office;Finance;
+EOF
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$dir" >/dev/null 2>&1 || true
+  echo "installed $dir/scdesk-pulse.desktop"
+  echo "installed $dir/scdesk-journal.desktop"
+}
+
+case $app in
+  "" ) pick ;;
+  pulse|journal) ;;
+  install|install-desktop) install_desktop; exit 0 ;;
+  -h|--help|help) usage ;;
+  *) usage ;;
+esac
+
+dir="$root/apps/$app"
+if [[ ! -f "$dir/package.json" ]]; then
+  echo "missing $dir/package.json" >&2
+  exit 1
+fi
+cd "$dir"
+if [[ ! -d node_modules ]]; then
+  echo "npm install in $dir"
+  npm install
+fi
+exec npm run tauri dev
