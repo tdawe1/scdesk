@@ -5,7 +5,8 @@ use serde::Deserialize;
 use contracts::parse_symbol;
 
 use super::{
-    compute_risk, is_sim_account, r_value, trading_day, Fill, JournalError, Trade, DEFAULT_RISK_TICKS,
+    compute_risk, is_sim_account, r_value, trading_day, Fill, JournalError, Trade,
+    DEFAULT_RISK_TICKS,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -145,12 +146,13 @@ pub fn imported_to_trade(raw: &ImportedTrade, default_risk_ticks: f64) -> Trade 
         open_datetime: raw.open_datetime.clone().unwrap_or_default(),
         close_datetime: raw.close_datetime.clone(),
         trading_day: trading_day(open_ms, tz),
-        is_closed: raw
-            .is_closed
-            .unwrap_or(raw.close_epoch_ms.is_some()),
+        is_closed: raw.is_closed.unwrap_or(raw.close_epoch_ms.is_some()),
         notes: String::new(),
         tags: Vec::new(),
         screenshots: Vec::new(),
+        mae_source: Some("import".into()),
+        post_exit_mfe: None,
+        checklist: Vec::new(),
         tick_size: tick,
         currency_per_tick: cpt,
         source: "ndjson".into(),

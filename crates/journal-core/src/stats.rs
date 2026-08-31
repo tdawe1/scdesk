@@ -176,7 +176,8 @@ fn max_drawdown(curve: &[EquityPoint]) -> f64 {
 }
 
 pub fn calendar(trades: &[Trade]) -> Vec<CalendarDay> {
-    let mut map: std::collections::BTreeMap<String, CalendarDay> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<String, CalendarDay> =
+        std::collections::BTreeMap::new();
     for t in trades.iter().filter(|t| t.is_closed) {
         let e = map.entry(t.trading_day.clone()).or_insert(CalendarDay {
             date: t.trading_day.clone(),
@@ -242,10 +243,7 @@ pub fn rule_breaks(trades: &[Trade], rules: &Rules) -> Vec<RuleBreak> {
             out.push(RuleBreak {
                 date: d.date.clone(),
                 kind: "trades".into(),
-                text: format!(
-                    "{} trades (max {})",
-                    d.trades, rules.max_trades_per_day
-                ),
+                text: format!("{} trades (max {})", d.trades, rules.max_trades_per_day),
             });
         }
         if rules.max_daily_loss > 0.0 && d.pnl < -rules.max_daily_loss {
@@ -264,6 +262,95 @@ pub fn rule_breaks(trades: &[Trade], rules: &Rules) -> Vec<RuleBreak> {
         }
     }
     out
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropSpec {
+    pub account: String,
+    pub starting_balance: f64,
+    pub dd_type: String,
+    pub dd_value: f64,
+    pub profit_target: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropSnapshot {
+    pub account: String,
+    pub equity: f64,
+    pub buffer: f64,
+    pub target_remaining: f64,
+    pub peak: f64,
+}
+
+pub fn prop_snapshot(trades: &[Trade], spec: &PropSpec) -> PropSnapshot {
+    let mut eq = spec.starting_balance;
+    let mut peak = spec.starting_balance;
+    for t in trades
+        .iter()
+        .filter(|t| t.is_closed && t.account == spec.account)
+    {
+        eq += t.net_pnl;
+        if eq > peak {
+            peak = eq;
+        }
+    }
+    let floor = if spec.dd_type.eq_ignore_ascii_case("trailing") {
+        peak - spec.dd_value
+    } else {
+        spec.starting_balance - spec.dd_value
+    };
+    PropSnapshot {
+        account: spec.account.clone(),
+        equity: eq,
+        buffer: eq - floor,
+        target_remaining: spec.profit_target - (eq - spec.starting_balance),
+        peak,
+    }
+}
+
+pub fn drawdown_series(curve: &[EquityPoint]) -> Vec<EquityPoint> {
+    let mut peak = f64::NEG_INFINITY;
+    curve
+        .iter()
+        .map(|p| {
+            if p.equity > peak {
+                peak = p.equity;
+            }
+            EquityPoint {
+                ts: p.ts,
+                equity: p.equity - peak,
+                r_equity: 0.0,
+            }
+        })
+        .collect()
+}
+
+pub fn r_histogram(trades: &[Trade], buckets: usize) -> Vec<(f64, usize)> {
+    let rs: Vec<f64> = trades.iter().filter_map(|t| t.r_value).collect();
+    if rs.is_empty() || buckets == 0 {
+        return Vec::new();
+    }
+    let min = rs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = rs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let span = (max - min).max(0.5);
+    let mut counts = vec![0usize; buckets];
+    for r in &rs {
+        let i = (((r - min) / span) * (buckets as f64 - 1.0)).floor() as usize;
+        counts[i.min(buckets - 1)] += 1;
+    }
+    counts
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (min + span * i as f64 / buckets as f64, n))
+        .collect()
+}
+
+pub fn mfe_mae_points(trades: &[Trade]) -> Vec<(f64, f64, f64)> {
+    trades
+        .iter()
+        .filter(|t| t.mfe.is_some() || t.mae.is_some())
+        .map(|t| (t.mae.unwrap_or(0.0), t.mfe.unwrap_or(0.0), t.net_pnl))
+        .collect()
 }
 
 pub fn hour_histogram(trades: &[Trade]) -> Vec<(u32, f64, usize)> {

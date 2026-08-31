@@ -1983,6 +1983,7 @@ dependencies = [
  "chrono",
  "contracts",
  "rusqlite",
+ "scid",
  "serde",
  "serde_json",
  "tempfile",
@@ -3250,6 +3251,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "journal-core",
+ "scid",
  "serde",
  "serde_json",
  "sierra-paths",
@@ -3328,6 +3330,9 @@ dependencies = [
 [[package]]
 name = "scid"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "scopeguard"

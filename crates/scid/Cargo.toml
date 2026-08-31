@@ -4,4 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Sierra Chart .scid tick file reader (phase 5)"
+description = "Sierra Chart .scid tick file reader"
+
+[dependencies]
+serde = { workspace = true }

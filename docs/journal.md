@@ -14,13 +14,20 @@ Local SQLite journal for Sierra Chart fills. Independent of SCS Trading Journal.
 - Tombstones: deleted ids are not resurrected on reimport
 - `$` / `R` toggle. Sim accounts can be excluded from stats
 
+## Also
+
+- `.scid` MFE/MAE + 30m post-exit MFE from Sierra `Data/*.scid` (trade detail → **.scid MFE**)
+- ACSIL `Data/scdesk/fills.ndjson` import (flat-to-flat grouping)
+- Screenshots folder `{Journal}/screenshots` matched by id/symbol+date
+- Prop-firm tiles (buffer / target remaining); halt file `Data/scdesk/tm_halt.json` when rules break
+- Replay command file `Data/scdesk/replay.json` for an ACSIL/study to pick up
+- Drawdown, R histogram, MAE/MFE scatter, yearly heatmap, checklist, screenshot reorder
+
 ## Not in this build
 
-- Rolling ffmpeg video buffer
-- NinjaTrader connector
-- Trade Manager live halt file
-- Gallery crop editor
-- Full `.scid` MFE rescan (record parser exists in `crates/scid`)
+- Rolling ffmpeg video buffer (out of scope)
+- NinjaTrader connector (out of scope)
+- Interactive gallery crop rectangle (reorder is in)
 
 ACSIL study: `acsil/scdesk_journal.cpp` (remote-build in Sierra).
 

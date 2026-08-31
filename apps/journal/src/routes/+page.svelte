@@ -25,8 +25,19 @@
     is_sim: boolean;
     notes: string;
     tags: string[];
-    screenshots: string[];
+    screenshots: { path: string; crop?: { x: number; y: number; w: number; h: number } | null }[];
     fills: Fill[];
+    mae_source?: string | null;
+    post_exit_mfe?: number | null;
+    checklist: { id: string; label: string; checked: boolean }[];
+  };
+  type Shot = Trade["screenshots"][number];
+  type Prop = {
+    account: string;
+    equity: number;
+    buffer: number;
+    target_remaining: number;
+    peak: number;
   };
   type Kpis = {
     trades: number;
@@ -51,6 +62,13 @@
     default_risk_ticks: number;
     unit: string;
     rules: { max_trades_per_day: number; max_daily_loss: number; max_daily_loss_r: number };
+  };
+  type PropSpec = {
+    account: string;
+    starting_balance: number;
+    dd_type: string;
+    dd_value: number;
+    profit_target: number;
   };
   type Session = { date: string; notes: string; mood: number | null; market_condition: string };
   type Break = { date: string; kind: string; text: string };
@@ -80,6 +98,17 @@
   let session = $state<Session>({ date: "", notes: "", mood: null, market_condition: "" });
   let breaks = $state<Break[]>([]);
   let gallery = $state<Trade[]>([]);
+  let dd = $state<Eq[]>([]);
+  let rhist = $state<[number, number][]>([]);
+  let scatter = $state<[number, number, number][]>([]);
+  let props = $state<Prop[]>([]);
+  let propDraft = $state<PropSpec>({
+    account: "",
+    starting_balance: 50000,
+    dd_type: "static",
+    dd_value: 2000,
+    profit_target: 3000,
+  });
   let error = $state<string | null>(null);
   let importing = $state(false);
   let tsvDraft = $state("");
@@ -121,7 +150,7 @@
         direction: filter.direction || null,
         exclude_sim: settings?.exclude_sim ?? false,
       };
-      const [t, k, e, c, h, m, a, b, g] = await Promise.all([
+      const [t, k, e, c, h, m, a, b, g, ddown, rh, sc, pr] = await Promise.all([
         invoke<Trade[]>("list_trades", { filter: f }),
         invoke<Kpis>("kpis", { filter: f }),
         invoke<Eq[]>("equity", { filter: f }),
@@ -131,6 +160,10 @@
         invoke<string[]>("accounts"),
         invoke<Break[]>("rule_breaks", { filter: f }),
         invoke<Trade[]>("gallery", { filter: f }),
+        invoke<Eq[]>("drawdown", { filter: f }),
+        invoke<[number, number][]>("r_hist", { filter: f }),
+        invoke<[number, number, number][]>("mfe_mae", { filter: f }),
+        invoke<Prop[]>("prop_tiles", { filter: f }),
       ]);
       trades = t;
       kpis = k;
@@ -141,6 +174,11 @@
       accts = a;
       breaks = b;
       gallery = g;
+      dd = ddown;
+      rhist = rh;
+      scatter = sc;
+      props = pr;
+      void invoke("write_halt", { breaks: b });
       error = null;
     } catch (e) {
       error = String(e);
@@ -223,11 +261,101 @@
     let bin = "";
     bytes.forEach((b) => (bin += String.fromCharCode(b)));
     const b64 = btoa(bin);
-    const shots = await invoke<string[]>("attach_screenshot", {
+    const shots = await invoke<Shot[]>("attach_screenshot", {
       id: selected.id,
       base64Png: b64,
     });
     selected = { ...selected, screenshots: shots };
+    await refresh();
+  }
+
+  const defaultChecks = [
+    { id: "htf", label: "HTF aligned", checked: false },
+    { id: "news", label: "News clear", checked: false },
+    { id: "risk", label: "Risk defined", checked: false },
+    { id: "aplus", label: "A+ setup", checked: false },
+  ];
+
+  async function scanTicks() {
+    if (!selected) return;
+    try {
+      const r = await invoke<unknown>("scan_scid", { id: selected.id });
+      error = r ? "scid MFE/MAE applied" : "no matching .scid";
+      await refresh();
+      selected = trades.find((x) => x.id === selected?.id) ?? selected;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function replay() {
+    if (!selected) return;
+    await invoke("write_replay", {
+      symbol: selected.symbol_raw,
+      datetime: selected.open_datetime,
+    });
+    error = "wrote Data/scdesk/replay.json";
+  }
+
+  async function saveChecks() {
+    if (!selected) return;
+    const items = selected.checklist.length ? selected.checklist : defaultChecks;
+    await invoke("set_checklist", { id: selected.id, items });
+    await refresh();
+  }
+
+  async function moveShot(i: number, dir: number) {
+    if (!selected) return;
+    const j = i + dir;
+    if (j < 0 || j >= selected.screenshots.length) return;
+    const shots = [...selected.screenshots];
+    [shots[i], shots[j]] = [shots[j], shots[i]];
+    await invoke("set_shots", { id: selected.id, shots });
+    selected = { ...selected, screenshots: shots };
+  }
+
+  function heatCell(d: Day | null): string {
+    if (!d) return "";
+    const v = unit === "R" ? d.r : d.pnl;
+    if (v > 0) return "up";
+    if (v < 0) return "down";
+    return "";
+  }
+
+  const yearCells = $derived.by(() => {
+    if (!days.length) return [] as { date: string; d: Day | null }[];
+    const map = new Map(days.map((d) => [d.date, d]));
+    const start = Date.parse(`${days[0].date}T00:00:00Z`);
+    const end = Date.parse(`${days[days.length - 1].date}T00:00:00Z`);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+    const out: { date: string; d: Day | null }[] = [];
+    for (let t = start; t <= end; t += 86_400_000) {
+      const date = new Date(t).toISOString().slice(0, 10);
+      out.push({ date, d: map.get(date) ?? null });
+    }
+    return out;
+  });
+
+  const scatterPts = $derived.by(() => {
+    if (!scatter.length) return [] as { x: number; y: number; pnl: number }[];
+    const xs = scatter.map((p) => p[0]);
+    const ys = scatter.map((p) => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const sx = maxX - minX || 1;
+    const sy = maxY - minY || 1;
+    return scatter.map(([mae, mfe, pnl]) => ({
+      x: 8 + ((mae - minX) / sx) * 184,
+      y: 72 - ((mfe - minY) / sy) * 64,
+      pnl,
+    }));
+  });
+
+  async function saveProp() {
+    if (!propDraft.account) return;
+    await invoke("save_prop", { spec: propDraft });
     await refresh();
   }
 
@@ -277,6 +405,17 @@
         <p class="muted">import trades to build a curve</p>
       {/if}
     </section>
+    {#if props.length}
+      <section class="kpis">
+        {#each props as p}
+          <article>
+            <div class="k">{p.account} buffer</div>
+            <b class={cls(p.buffer)}>{money(p.buffer)}</b>
+            <div class="k">target left {money(p.target_remaining)}</div>
+          </article>
+        {/each}
+      </section>
+    {/if}
     {#if mc}
       <section class="panel">
         <h2>monte carlo (400 shuffles of R)</h2>
@@ -286,6 +425,38 @@
           <article><div class="k">p95</div><b>{mc.p95.toFixed(1)}R</b></article>
           <article><div class="k">mean</div><b>{mc.mean.toFixed(1)}R</b></article>
         </div>
+      </section>
+    {/if}
+    {#if dd.length > 1}
+      <section class="panel">
+        <h2>drawdown</h2>
+        <svg viewBox="0 0 520 80" class="spark">
+          <polyline fill="none" stroke="#ff5c5c" stroke-width="1.6" points={spark(dd.map((p) => ({ ...p, r_equity: p.equity })))} />
+        </svg>
+      </section>
+    {/if}
+    {#if rhist.length}
+      <section class="panel">
+        <h2>R distribution</h2>
+        <div class="hours">
+          {#each rhist as [x, n]}
+            <div class="hrow">
+              <span>{x.toFixed(1)}</span>
+              <i style="width: {Math.min(100, n * 8)}%"></i>
+              <b>{n}</b>
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
+    {#if scatter.length}
+      <section class="panel">
+        <h2>MAE vs MFE (price)</h2>
+        <svg viewBox="0 0 200 80" class="spark">
+          {#each scatterPts as p}
+            <circle cx={p.x} cy={p.y} r="2.2" fill={p.pnl >= 0 ? "#3ddc97" : "#ff5c5c"} />
+          {/each}
+        </svg>
       </section>
     {/if}
     {#if breaks.length}
@@ -348,9 +519,14 @@
             <dt>stop</dt><dd>{selected.stop_price ?? "—"}</dd>
             <dt>net</dt><dd class={cls(selected.net_pnl)}>{money(selected.net_pnl)}</dd>
             <dt>R</dt><dd>{selected.r_value?.toFixed(2) ?? "—"}</dd>
-            <dt>MFE/MAE</dt><dd>{selected.mfe ?? "—"} / {selected.mae ?? "—"}</dd>
+            <dt>MFE/MAE</dt><dd>{selected.mfe?.toFixed(2) ?? "—"} / {selected.mae?.toFixed(2) ?? "—"} {selected.mae_source ?? ""}</dd>
+            <dt>post MFE</dt><dd>{selected.post_exit_mfe?.toFixed(2) ?? "—"}</dd>
             <dt>dur</dt><dd>{selected.duration_seconds ?? "—"}s</dd>
           </dl>
+          <div class="row">
+            <button onclick={scanTicks}>.scid MFE</button>
+            <button onclick={replay}>replay cmd</button>
+          </div>
           <h3>fills</h3>
           <ul>
             {#each selected.fills as f}
@@ -367,10 +543,30 @@
             <button onclick={saveNotes}>save</button>
             <button onclick={() => selected && remove(selected.id)}>delete</button>
           </div>
+          <h3>checklist</h3>
+          {#each (selected.checklist.length ? selected.checklist : defaultChecks) as c, i}
+            <label class="muted"
+              ><input
+                type="checkbox"
+                checked={c.checked}
+                onchange={(e) => {
+                  const items = (selected?.checklist.length ? selected.checklist : defaultChecks).map((x, j) =>
+                    j === i ? { ...x, checked: e.currentTarget.checked } : x,
+                  );
+                  if (selected) selected = { ...selected, checklist: items };
+                }}
+              /> {c.label}</label
+            >
+          {/each}
+          <button onclick={saveChecks}>save checklist</button>
           {#if selected.screenshots.length}
             <div class="shots">
-              {#each selected.screenshots as s}
-                <p class="muted">{s}</p>
+              {#each selected.screenshots as s, i}
+                <div class="shotrow">
+                  <span class="muted">{s.path}</span>
+                  <button onclick={() => moveShot(i, -1)}>up</button>
+                  <button onclick={() => moveShot(i, 1)}>dn</button>
+                </div>
               {/each}
             </div>
           {/if}
@@ -382,6 +578,14 @@
   {/if}
 
   {#if tab === "calendar"}
+    <div class="year">
+      {#each yearCells as c}
+        <i
+          class={heatCell(c.d)}
+          title={c.d ? `${c.date} ${c.d.trades} ${money(unit === "R" ? c.d.r : c.d.pnl)}` : c.date}
+        ></i>
+      {/each}
+    </div>
     <div class="cal">
       {#each days as d}
         <button
@@ -519,6 +723,28 @@
       <h3>import TradesList TSV</h3>
       <textarea bind:value={tsvDraft} placeholder="paste Sierra TradesList export"></textarea>
       <button onclick={importTsv}>import TSV</button>
+      <h3>prop firm account</h3>
+      {#if props.length}
+        <ul>
+          {#each props as p}
+            <li>{p.account} · eq {money(p.equity)} · buffer {money(p.buffer)}</li>
+          {/each}
+        </ul>
+      {/if}
+      <input placeholder="account" bind:value={propDraft.account} />
+      <label class="muted">starting
+        <input type="number" bind:value={propDraft.starting_balance} />
+      </label>
+      <label class="muted">dd type
+        <select bind:value={propDraft.dd_type}><option value="static">static</option><option value="trailing">trailing</option></select>
+      </label>
+      <label class="muted">dd value
+        <input type="number" bind:value={propDraft.dd_value} />
+      </label>
+      <label class="muted">profit target
+        <input type="number" bind:value={propDraft.profit_target} />
+      </label>
+      <button onclick={saveProp}>save prop</button>
     </section>
   {/if}
 </div>
@@ -557,5 +783,10 @@
   .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
   .gallery .gal { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: left; display: flex; flex-direction: column; gap: 4px; }
   .break { color: var(--down); margin: 4px 0; }
+  .year { display: flex; flex-wrap: wrap; gap: 3px; }
+  .year i { width: 10px; height: 10px; background: var(--panel-2); border-radius: 2px; }
+  .year i.up { background: var(--up); }
+  .year i.down { background: var(--down); }
+  .shotrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   label { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
 </style>

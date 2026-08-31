@@ -39,7 +39,11 @@ pub fn parse_tradeslist(text: &str) -> Result<Vec<Trade>, JournalError> {
             continue;
         }
         let dir_raw = get(i_type).to_ascii_uppercase();
-        let direction = if dir_raw.contains("SHORT") { "SHORT" } else { "LONG" };
+        let direction = if dir_raw.contains("SHORT") {
+            "SHORT"
+        } else {
+            "LONG"
+        };
         let entry: f64 = get(i_entry).replace(',', "").parse().unwrap_or(0.0);
         let exit: f64 = get(i_exit).replace(',', "").parse().unwrap_or(0.0);
         let qty: f64 = get(i_qty).replace(',', "").parse().unwrap_or(1.0);
@@ -61,14 +65,8 @@ pub fn parse_tradeslist(text: &str) -> Result<Vec<Trade>, JournalError> {
         let open_ms = parse_sc_datetime(&open_dt);
         let close_ms = parse_sc_datetime(&close_dt);
         let parsed = parse_symbol(&symbol);
-        let (tick, cpt, risk) = compute_risk(
-            &parsed,
-            None,
-            entry,
-            None,
-            qty.max(1.0),
-            DEFAULT_RISK_TICKS,
-        );
+        let (tick, cpt, risk) =
+            compute_risk(&parsed, None, entry, None, qty.max(1.0), DEFAULT_RISK_TICKS);
         let id = format!(
             "{}_{}_{}_{}",
             symbol.replace(['.', '-', ' '], "_"),
@@ -115,6 +113,9 @@ pub fn parse_tradeslist(text: &str) -> Result<Vec<Trade>, JournalError> {
             notes: String::new(),
             tags: Vec::new(),
             screenshots: Vec::new(),
+            mae_source: Some("import".into()),
+            post_exit_mfe: None,
+            checklist: Vec::new(),
             tick_size: tick,
             currency_per_tick: cpt,
             source: "tradeslist".into(),

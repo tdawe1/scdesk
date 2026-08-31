@@ -1,14 +1,22 @@
 //! Local trade journal: NDJSON / TradesList import, SQLite, stats.
 
 mod db;
+mod fills;
 mod ndjson;
 mod stats;
 mod tradeslist;
 
 pub use contracts::{parse_symbol, resolve_currency_per_tick, ParsedSymbol};
 pub use db::Journal;
-pub use ndjson::{imported_to_trade, parse_ndjson_line, parse_ndjson_text, ImportedFill, ImportedTrade};
-pub use stats::{monte_carlo, CalendarDay, EquityPoint, Kpis, MonteCarlo, RuleBreak, Rules};
+pub use fills::{fills_to_trades, parse_fills_text, AcsilFill};
+pub use ndjson::{
+    imported_to_trade, parse_ndjson_line, parse_ndjson_text, ImportedFill, ImportedTrade,
+};
+pub use stats::{
+    calendar, drawdown_series, equity_curve, hour_histogram, kpis, mfe_mae_points, monte_carlo,
+    r_histogram, CalendarDay, EquityPoint, Kpis, MonteCarlo, PropSnapshot, PropSpec, RuleBreak,
+    Rules,
+};
 pub use tradeslist::parse_tradeslist;
 
 use serde::{Deserialize, Serialize};
@@ -65,11 +73,36 @@ pub struct Trade {
     pub is_closed: bool,
     pub notes: String,
     pub tags: Vec<String>,
-    pub screenshots: Vec<String>,
+    pub screenshots: Vec<Shot>,
     pub tick_size: Option<f64>,
     pub currency_per_tick: Option<f64>,
     pub source: String,
     pub fills: Vec<Fill>,
+    pub mae_source: Option<String>,
+    pub post_exit_mfe: Option<f64>,
+    pub checklist: Vec<CheckItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Shot {
+    pub path: String,
+    #[serde(default)]
+    pub crop: Option<CropRect>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CropRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckItem {
+    pub id: String,
+    pub label: String,
+    pub checked: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -122,9 +155,7 @@ pub fn compute_risk(
         (Some(t), Some(c), Some(s)) if s > 0.0 && (entry - s).abs() > 1e-9 => {
             Some((entry - s).abs() / t * c * qty)
         }
-        (Some(_t), Some(c), _) if default_risk_ticks > 0.0 => {
-            Some(default_risk_ticks * c * qty)
-        }
+        (Some(_t), Some(c), _) if default_risk_ticks > 0.0 => Some(default_risk_ticks * c * qty),
         _ => None,
     };
     (tick, cpt, risk)
@@ -186,6 +217,134 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].symbol_root, "NQ");
         assert_eq!(rows[0].direction, "SHORT");
+    }
+
+    #[test]
+    fn acsil_fills_group_flat() {
+        let text = r#"{"symbol":"MNQU6.CME","account":"SIM1","side":1,"qty":1,"price":100,"posQty":1,"ts":"2026-08-01 10:00:00"}
+{"symbol":"MNQU6.CME","account":"SIM1","side":1,"qty":1,"price":100.5,"posQty":2,"ts":"2026-08-01 10:00:30"}
+{"symbol":"MNQU6.CME","account":"SIM1","side":2,"qty":2,"price":101,"posQty":0,"ts":"2026-08-01 10:01:00"}"#;
+        let fills = parse_fills_text(text).unwrap();
+        let trades = fills_to_trades(&fills, 8.0);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].direction, "LONG");
+        assert_eq!(trades[0].qty, 2.0);
+        assert!(trades[0].is_closed);
+        assert!(trades[0].net_pnl > 0.0);
+        assert_eq!(trades[0].fills.len(), 3);
+    }
+
+    #[test]
+    fn acsil_fills_short_without_posqty_uses_running_qty() {
+        let text = r#"{"symbol":"NQU6.CME","account":"Live","side":2,"qty":1,"price":20000,"ts":"2026-08-01 09:00:00"}
+{"symbol":"NQU6.CME","account":"Live","side":1,"qty":1,"price":19990,"ts":"2026-08-01 09:05:00"}"#;
+        let trades = fills_to_trades(&parse_fills_text(text).unwrap(), 8.0);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].direction, "SHORT");
+        assert!(trades[0].is_closed);
+        assert!(trades[0].net_pnl > 0.0);
+    }
+
+    #[test]
+    fn prop_static_vs_trailing_floor() {
+        use super::stats::{prop_snapshot, PropSpec};
+        let mut t = imported_to_trade(
+            &parse_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson")).unwrap()[0],
+            8.0,
+        );
+        t.account = "PROP1".into();
+        t.net_pnl = 1000.0;
+        t.is_closed = true;
+        let static_spec = PropSpec {
+            account: "PROP1".into(),
+            starting_balance: 50_000.0,
+            dd_type: "static".into(),
+            dd_value: 2_000.0,
+            profit_target: 3_000.0,
+        };
+        let s = prop_snapshot(std::slice::from_ref(&t), &static_spec);
+        assert!((s.equity - 51_000.0).abs() < 1e-9);
+        assert!((s.buffer - 3_000.0).abs() < 1e-9);
+        let trail = PropSpec {
+            dd_type: "trailing".into(),
+            ..static_spec
+        };
+        let tr = prop_snapshot(std::slice::from_ref(&t), &trail);
+        assert!((tr.buffer - 2_000.0).abs() < 1e-9, "{}", tr.buffer);
+    }
+
+    #[test]
+    fn scid_mfe_survives_reimport() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        let id = j.list_trades(&TradeFilter::default()).unwrap()[0]
+            .id
+            .clone();
+        j.apply_scid(
+            &id,
+            &scid::MaeMfe {
+                mfe: 12.5,
+                mae: -3.25,
+                post_exit_mfe: Some(1.0),
+                samples: 8,
+                curve: vec![],
+            },
+        )
+        .unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        let t = j.get_trade(&id).unwrap().unwrap();
+        assert_eq!(t.mae_source.as_deref(), Some("scid"));
+        assert_eq!(t.mfe, Some(12.5));
+        assert_eq!(t.mae, Some(-3.25));
+        assert_eq!(t.post_exit_mfe, Some(1.0));
+    }
+
+    #[test]
+    fn import_fills_and_screenshots_and_checklist() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        let data = dir.path().join("Data");
+        std::fs::create_dir_all(data.join("scdesk")).unwrap();
+        std::fs::write(
+            data.join("scdesk/fills.ndjson"),
+            r#"{"symbol":"MNQU6.CME","account":"SIM1","side":1,"qty":1,"price":100,"posQty":1,"ts":"2026-08-01 10:00:00"}
+{"symbol":"MNQU6.CME","account":"SIM1","side":2,"qty":1,"price":101,"posQty":0,"ts":"2026-08-01 10:01:00"}
+"#,
+        )
+        .unwrap();
+        assert_eq!(j.import_fills_dir(&data).unwrap(), 1);
+        let t = &j.list_trades(&TradeFilter::default()).unwrap()[0];
+        let shots_dir = dir.path().join("shots");
+        std::fs::create_dir_all(&shots_dir).unwrap();
+        let fname = format!("{}_{}.png", t.symbol_root, t.trading_day.replace('-', ""));
+        std::fs::write(shots_dir.join(fname), b"png").unwrap();
+        assert_eq!(j.import_screenshots_dir(&shots_dir).unwrap(), 1);
+        let t = j.get_trade(&t.id).unwrap().unwrap();
+        assert_eq!(t.screenshots.len(), 1);
+        j.set_checklist(
+            &t.id,
+            &[CheckItem {
+                id: "htf".into(),
+                label: "HTF aligned".into(),
+                checked: true,
+            }],
+        )
+        .unwrap();
+        assert!(j.get_trade(&t.id).unwrap().unwrap().checklist[0].checked);
+        let spec = super::stats::PropSpec {
+            account: "SIM1".into(),
+            starting_balance: 50_000.0,
+            dd_type: "static".into(),
+            dd_value: 2_000.0,
+            profit_target: 3_000.0,
+        };
+        j.upsert_prop(&spec).unwrap();
+        let tiles = j.prop_tiles(&TradeFilter::default()).unwrap();
+        assert_eq!(tiles.len(), 1);
+        assert!(tiles[0].buffer > 0.0);
     }
 
     #[test]
