@@ -52,3 +52,4 @@ First tagged surface. Commits `d063501` … `254cb9e` plus this remainder.
 | `db3c3ab` | Render shots, auto-scan `.scid`, flatten on halt |
 | `254cb9e` | Named views, bootstrap MC, ticks/R, watch, replay, VWAP overlay |
 | `d83e475` | Crop, file attach, checklist template, backup, CI, CHANGELOG |
+| `8e5bd6b` | Fix CHANGELOG git table for the remainder commit |

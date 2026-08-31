@@ -12,7 +12,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: crate tests
@@ -21,7 +21,7 @@ jobs:
   tauri-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Tauri Linux deps
@@ -34,17 +34,17 @@ jobs:
   ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: |
             apps/pulse/package-lock.json
             apps/journal/package-lock.json
       - name: pulse svelte-check
         working-directory: apps/pulse
-        run: npm ci && npx svelte-check --threshold error
+        run: npm ci && npx svelte-kit sync && npx svelte-check --tsconfig ./tsconfig.json --threshold error
       - name: journal svelte-check
         working-directory: apps/journal
-        run: npm ci && npx svelte-check --threshold error
+        run: npm ci && npx svelte-kit sync && npx svelte-check --tsconfig ./tsconfig.json --threshold error
