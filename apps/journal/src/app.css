@@ -1,0 +1,32 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --panel: #121821;
+  --panel-2: #0e141c;
+  --text: #e8edf5;
+  --muted: #8b9bb4;
+  --up: #3ddc97;
+  --down: #ff5c5c;
+  --border: #243044;
+  --stale: #f5c542;
+}
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: 13px;
+}
+* { box-sizing: border-box; }
+button, select, input, textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+button { padding: 5px 10px; cursor: pointer; }
+button.on, button.active { border-color: var(--up); color: var(--up); }
+input, select { padding: 4px 8px; }
+textarea { width: 100%; min-height: 80px; padding: 8px; }

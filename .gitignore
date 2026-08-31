@@ -14,4 +14,7 @@ src-tauri/gen/
 
 # local Sierra / journal data must never be committed
 *.scid
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 trading-journal.db
