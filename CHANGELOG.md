@@ -4,6 +4,22 @@ All notable changes to scdesk (Pulse + Journal). Dates are UTC.
 
 Independent implementation. Not affiliated with Sierra Chart or SCS.
 
+## Unreleased
+
+### Both
+
+- 20px inset around the window so Pulse and Journal are not flush to the frame
+- Window inset is margin on the main pane (not body padding) so Pulse/Journal still scroll
+
+### Journal
+
+- Import no longer blocks the window; NDJSON files are fingerprinted so unchanged files are skipped
+- Watcher ignores `tm_halt.json` / `replay.json` (writing halt no longer retriggers a full import)
+- Dashboard loads trades once instead of 14 parallel full-table scans
+- Blocked accounts are a Settings list in `journal.toml`, not compiled into the binary
+- Import Sierra `TradeActivityLogs/*.data` so accounts that never hit the NDJSON study still show up
+- `.scid` scan is on-demand from trade detail, not on every import
+
 ## 0.1.0 — 2026-08-31
 
 First tagged surface. Commits `d063501` … `254cb9e` plus this remainder.

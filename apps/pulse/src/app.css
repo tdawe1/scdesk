@@ -11,6 +11,7 @@
   --stale: #f5c542;
   --border: #243044;
   --gap: 14px;
+  --window-inset: 20px;
 }
 
 html,

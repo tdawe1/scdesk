@@ -833,9 +833,11 @@
 
 <style>
   .desk {
-    height: 100%;
+    height: calc(100% - 2 * var(--window-inset));
+    width: calc(100% - 2 * var(--window-inset));
+    margin: var(--window-inset);
     overflow: auto;
-    padding: 8px 12px 16px;
+    padding: 0;
     display: flex;
     flex-direction: column;
     gap: 10px;

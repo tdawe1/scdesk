@@ -18,3 +18,4 @@ src-tauri/gen/
 *.sqlite-wal
 *.sqlite-shm
 trading-journal.db
+journal.toml

@@ -9,6 +9,7 @@
   --down: #ff5c5c;
   --border: #243044;
   --stale: #f5c542;
+  --window-inset: 20px;
 }
 html, body {
   margin: 0;
@@ -17,6 +18,9 @@ html, body {
   color: var(--text);
   font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
   font-size: 13px;
+}
+body {
+  overflow: hidden;
 }
 * { box-sizing: border-box; }
 button, select, input, textarea {
