@@ -1,44 +1,71 @@
 # scdesk
 
-[![CI](https://github.com/tdawe1/scdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/tdawe1/scdesk/actions/workflows/ci.yml)
+Two Linux desktop apps for people who chart in Sierra Chart (often under Wine).
 
-Open-source native Linux companions for Sierra Chart:
+**Pulse** is a market-quality dashboard for ES/NQ. It pulls public data (Yahoo, Forex Factory) and does not need Sierra Chart running.
 
-- **scdesk Pulse** — ES/NQ quality dashboard (Yahoo / calendar). No Sierra Chart process required.
-- **scdesk Journal** — local trade journal that reads Sierra Chart's documented file surfaces (NDJSON, TradesList, `.scid`) plus a small ACSIL study we own.
+**Journal** is a local trade journal. It reads Sierra’s files (fills, TradesList, `.scid`) and can log fills from a small ACSIL study in `acsil/`.
 
-Independent implementation. Not affiliated with Sierra Chart or SCS.
+They are separate programs. Scores, layout, and the journal schema are ours — not a reskin of SCS Market Pulse or SCS Trading Journal, and not affiliated with Sierra Chart or SCS.
 
-See [CHANGELOG.md](CHANGELOG.md) for the commit map.
+Linux only. MIT licensed.
 
-## Status
+## Pulse
 
-Pulse v1 feature surface matches the public SCS Market Pulse checklist (independent scoring — `docs/scoring.md`, `docs/pulse-parity.md`).
+A 0–100 quality score (volatility, momentum, trend, breadth, macro, plus a small execution overlay), a LONG/SHORT/NEUTRAL bias, and a suggested size. Day and swing use different weights; the formulas live in `crates/pulse-core/scoring.toml`.
 
-Journal covers the Sierra file surface plus halt/replay ACSIL (`docs/journal.md`, `docs/journal-parity.md`).
-
-Not in this build: NinjaTrader, ffmpeg rolling video, Windows installer. Put/call is estimated from VIX (no CBOE series on Yahoo).
-
-## Requirements
-
-- Rust 1.85+
-- Node 20+
-- GTK 3 + webkit2gtk 4.1 (Tauri 2 on Linux)
-
-## Develop
+Also on the board: SPY/QQQ/VIX tape, VIX/SKEW/VVIX, breadth, a sector heatmap, the economic calendar, and desktop alerts. Put/call is estimated from VIX because Yahoo does not publish CBOE equity PCR.
 
 ```bash
-cargo test --workspace --exclude scdesk-pulse --exclude scdesk-journal
 cd apps/pulse && npm install && npm run tauri dev
+```
+
+Keys: `D` / `S` day vs swing, `Ctrl+R` refresh, `T` always on top, `Delete` minimize.
+
+If GitHub has a newer release it will say so. It will not download or install anything.
+
+## Journal
+
+Trades land in `~/.local/share/scdesk/journal.sqlite`. On launch (and when Sierra’s files change) it imports:
+
+- `Data/Journal/trades_*.ndjson`
+- `Data/scdesk/fills.ndjson` from our ACSIL study
+- Sierra TradesList TSV if you paste it in Settings
+
+You get a dashboard (P&L, win rate, equity, Monte Carlo on R), the trade list with notes/tags/screenshots, calendar, gallery, session diary, and daily risk rules. R is net P&amp;L over initial risk (stop if you had one, otherwise the default tick risk in Settings).
+
+MFE/MAE can be filled from the matching `.scid` in `Data/`. If you blow a daily rule or a prop-firm floor, Journal writes `Data/scdesk/tm_halt.json`. Rebuild `acsil/scdesk_journal.cpp` inside Sierra if you want that file to flatten the account or to start a chart replay from `replay.json`.
+
+```bash
 cd apps/journal && npm install && npm run tauri dev
 ```
 
-Pulse talks to Yahoo Finance (unofficial). Journal does not.
+Settings can copy the sqlite file to `~/.local/share/scdesk/backups/`.
 
-Sierra Chart root search order: `SC_ROOT`, `~/.wine/drive_c/SierraChart`, `$WINEPREFIX/drive_c/SierraChart`, then `~/.config/scdesk/config.toml`.
+## Finding Sierra Chart
 
-Keyboard in Pulse: `D`/`S` mode, `Ctrl+R` refresh, `T` always-on-top, `Delete` minimize.
+First existing directory wins:
 
-Alerts use the desktop notification daemon (plus a short beep). Pulse checks GitHub releases for updates; it does not auto-install.
+1. `SC_ROOT`
+2. `~/.wine/drive_c/SierraChart`
+3. `$WINEPREFIX/drive_c/SierraChart`
+4. `sc_root` in `~/.config/scdesk/config.toml`
 
-Journal sqlite lives at `~/.local/share/scdesk/journal.sqlite`. Settings → **copy sqlite to backups/** writes `~/.local/share/scdesk/backups/`.
+`SierraChartInstance_2` under the root is picked up automatically. More in `docs/sierra-paths.md`.
+
+## Build
+
+Rust 1.85+, Node 20+, GTK 3 and webkit2gtk 4.1.
+
+```bash
+cargo test --workspace --exclude scdesk-pulse --exclude scdesk-journal
+```
+
+The two `cd apps/… && npm run tauri dev` commands above are the usual way to run the UIs. Packaging a `.deb` is `npm run tauri build` in each app directory (still Linux).
+
+## Docs
+
+- Pulse scoring: `docs/scoring.md`
+- Journal: `docs/journal.md`
+- ACSIL study: `acsil/README.md`
+- History: `CHANGELOG.md`
