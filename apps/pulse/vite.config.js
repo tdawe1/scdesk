@@ -16,14 +16,15 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // WebKitGTK often resolves "localhost" to ::1 while Vite is on IPv4.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",
           host,
           port: 1421,
         }
-      : undefined,
+      : { host: "127.0.0.1" },
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],

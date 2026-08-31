@@ -16,6 +16,8 @@ Also on the board: SPY/QQQ/VIX tape, VIX/SKEW/VVIX, breadth, a sector heatmap, t
 cd apps/pulse && npm install && npm run tauri dev
 ```
 
+That starts the Vite UI on `127.0.0.1:1420` and the desktop window. A debug `cargo run` of the binary alone will show “can’t connect to localhost” because the UI server is not running.
+
 Keys: `D` / `S` day vs swing, `Ctrl+R` refresh, `T` always on top, `Delete` minimize.
 
 If GitHub has a newer release it will say so. It will not download or install anything.
@@ -35,6 +37,8 @@ MFE/MAE can be filled from the matching `.scid` in `Data/`. If you blow a daily 
 ```bash
 cd apps/journal && npm install && npm run tauri dev
 ```
+
+Journal’s UI is `127.0.0.1:1430`. Same rule: use `tauri dev` (or `tauri build`), not a bare `cargo run`.
 
 Settings can copy the sqlite file to `~/.local/share/scdesk/backups/`.
 
