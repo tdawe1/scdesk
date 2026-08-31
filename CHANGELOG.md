@@ -51,5 +51,4 @@ First tagged surface. Commits `d063501` … `254cb9e` plus this remainder.
 | `28f9cfc` | Journal `.scid` MFE, ACSIL fills, prop tiles, extra charts |
 | `db3c3ab` | Render shots, auto-scan `.scid`, flatten on halt |
 | `254cb9e` | Named views, bootstrap MC, ticks/R, watch, replay, VWAP overlay |
-
-| `5d3c6c7` | Crop, file attach, checklist template, backup, CI, CHANGELOG |
+| `d83e475` | Crop, file attach, checklist template, backup, CI, CHANGELOG |
