@@ -31,10 +31,6 @@ body {
   box-sizing: border-box;
 }
 
-html {
-  zoom: var(--zoom, 1);
-}
-
 html[data-theme="light"] {
   --bg: #f3f5f8;
   --panel: #ffffff;

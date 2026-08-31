@@ -415,6 +415,7 @@
 </script>
 
 <div class="desk">
+  <div class="chrome">
   <header class="topbar">
     <div class="brand">scdesk pulse</div>
     <div class="modes">
@@ -473,19 +474,22 @@
   {#if tapeQuotes.length}
     <div class="tape" title="spot tape">
       <div class="tape-track">
-        {#each [...tapeQuotes, ...tapeQuotes] as q, i (q.id + i)}
-          <span class="tick {cls(q.change)}">
-            <b>{q.id}</b>
-            {fmt(q.last)}
-            {fmtPct(q.change_pct)}
-            {#if q.volume}
-              <i>{fmtVol(q.volume)}</i>
-            {/if}
-          </span>
+        {#each [0, 1] as copy (copy)}
+          {#each tapeQuotes as q (copy + q.id)}
+            <span class="tick {cls(q.change)}">
+              <b>{q.id}</b>
+              {fmt(q.last)}
+              {fmtPct(q.change_pct)}
+              {#if q.volume}
+                <i>{fmtVol(q.volume)}</i>
+              {/if}
+            </span>
+          {/each}
         {/each}
       </div>
     </div>
   {/if}
+  </div>
 
   {#if dash?.update?.newer}
     <div class="banner orange">
@@ -831,22 +835,32 @@
   .desk {
     height: 100%;
     overflow: auto;
-    padding: 16px 18px 24px;
+    padding: 8px 12px 16px;
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 10px;
+    zoom: var(--zoom, 1);
+  }
+
+  .chrome {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-bottom: 4px;
+    background: var(--bg);
   }
 
   .topbar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px 12px;
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    background: color-mix(in srgb, var(--bg) 92%, transparent);
-    padding: 4px 0 10px;
+    gap: 6px 10px;
+    background: var(--bg);
+    padding: 2px 0 6px;
     border-bottom: 1px solid var(--border);
   }
   .brand {
@@ -914,24 +928,30 @@
   }
 
   .tape {
+    flex: 0 0 auto;
     overflow: hidden;
+    height: 30px;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 6px 0;
   }
   .tape-track {
-    display: inline-flex;
-    gap: 22px;
-    padding-left: 16px;
-    animation: marquee 48s linear infinite;
+    display: flex;
+    align-items: center;
+    width: max-content;
+    height: 30px;
+    gap: 1.4rem;
+    padding: 0 1rem;
+    animation: marquee 90s linear infinite;
     white-space: nowrap;
   }
   .tape:hover .tape-track {
     animation-play-state: paused;
   }
   .tick {
+    flex: 0 0 auto;
     font-size: 12px;
+    line-height: 30px;
     font-variant-numeric: tabular-nums;
   }
   .tick b {
@@ -953,7 +973,7 @@
   }
 
   .block h2 {
-    margin: 0 0 10px;
+    margin: 0 0 6px;
     font-size: 11px;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -977,14 +997,14 @@
 
   .indexes {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
   }
   .indexes article {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 12px 14px;
+    padding: 8px 12px;
   }
   .sym {
     font-size: 11px;
@@ -1019,19 +1039,19 @@
 
   .hero {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
   }
   .hero-card {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 14px 16px;
-    min-height: 110px;
+    padding: 10px 12px;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     justify-content: center;
-    gap: 6px;
+    gap: 4px;
   }
   .gauge-card,
   .spark-card {
@@ -1052,15 +1072,15 @@
     color: var(--down);
   }
   .gauge {
-    width: 96px;
-    height: 96px;
+    width: 80px;
+    height: 80px;
     border-radius: 50%;
     display: grid;
     place-items: center;
   }
   .gauge-inner {
-    width: 70px;
-    height: 70px;
+    width: 58px;
+    height: 58px;
     border-radius: 50%;
     background: var(--bg);
     display: flex;
@@ -1111,14 +1131,14 @@
 
   .pillars {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 8px;
   }
   .pillars article {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 12px 14px;
+    padding: 8px 10px;
   }
   .phead {
     display: flex;
@@ -1163,8 +1183,8 @@
 
   .bottom-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 18px;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
     align-items: start;
   }
   .exec {
