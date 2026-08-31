@@ -671,6 +671,14 @@ impl Journal {
         Ok(n)
     }
 
+    pub fn backup_to(&self, dest: &Path) -> Result<(), JournalError> {
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        self.conn.backup(rusqlite::DatabaseName::Main, dest, None)?;
+        Ok(())
+    }
+
     pub fn save_view(&self, view: &SavedView) -> Result<(), JournalError> {
         self.conn.execute(
             "INSERT INTO saved_views(name, filter) VALUES(?1,?2)

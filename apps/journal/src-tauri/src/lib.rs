@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use journal_core::{
-    scid_for_trade, CheckItem, Journal, Kpis, MonteCarlo, PropSnapshot, PropSpec, RuleBreak, Rules,
-    SavedView, Session, Shot, Trade, TradeFilter,
+    default_checklist, scid_for_trade, CheckItem, Journal, Kpis, MonteCarlo, PropSnapshot,
+    PropSpec, RuleBreak, Rules, SavedView, Session, Shot, Trade, TradeFilter,
 };
 use serde::{Deserialize, Serialize};
 use sierra_paths::{discover_from_os, Discovery};
@@ -26,6 +26,8 @@ struct AppSettings {
     rules: Rules,
     #[serde(default = "chicago")]
     session_tz: String,
+    #[serde(default = "default_checklist")]
+    checklist: Vec<CheckItem>,
 }
 
 fn eight() -> f64 {
@@ -46,6 +48,7 @@ impl Default for AppSettings {
             unit: "$".into(),
             rules: Rules::default(),
             session_tz: chicago(),
+            checklist: default_checklist(),
         }
     }
 }
@@ -598,6 +601,25 @@ fn save_view(state: tauri::State<AppState>, view: SavedView) -> Result<(), Strin
 }
 
 #[tauri::command]
+fn backup_db(state: tauri::State<AppState>) -> Result<String, String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("scdesk/backups")
+        .join(format!("journal-{stamp}.sqlite"));
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .backup_to(&dest)
+        .map_err(|e| e.to_string())?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 fn delete_view(state: tauri::State<AppState>, name: String) -> Result<(), String> {
     state
         .journal
@@ -765,6 +787,7 @@ pub fn run() {
             list_views,
             save_view,
             delete_view,
+            backup_db,
             write_halt,
             write_replay
         ])

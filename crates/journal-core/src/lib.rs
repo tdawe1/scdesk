@@ -142,6 +142,22 @@ pub enum JournalError {
 /// Default risk in ticks when the trade has no stop.
 pub const DEFAULT_RISK_TICKS: f64 = 8.0;
 
+pub fn default_checklist() -> Vec<CheckItem> {
+    [
+        ("htf", "HTF aligned"),
+        ("news", "News clear"),
+        ("risk", "Risk defined"),
+        ("aplus", "A+ setup"),
+    ]
+    .into_iter()
+    .map(|(id, label)| CheckItem {
+        id: id.into(),
+        label: label.into(),
+        checked: false,
+    })
+    .collect()
+}
+
 pub fn is_sim_account(account: &str) -> bool {
     let u = account.to_ascii_uppercase();
     u.contains("SIM") || u.starts_with("DEMO")
@@ -508,5 +524,19 @@ mod tests {
         assert_eq!(views[0].filter.roots, vec!["NQ".to_string()]);
         j.delete_view("NQ shorts").unwrap();
         assert!(j.list_views().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backup_sqlite_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("j.sqlite");
+        let j = Journal::open(&src).unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        let dest = dir.path().join("bak.sqlite");
+        j.backup_to(&dest).unwrap();
+        let j2 = Journal::open(&dest).unwrap();
+        assert_eq!(j2.list_trades(&TradeFilter::default()).unwrap().len(), 2);
+        assert_eq!(default_checklist().len(), 4);
     }
 }

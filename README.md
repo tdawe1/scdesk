@@ -1,5 +1,7 @@
 # scdesk
 
+[![CI](https://github.com/tdawe1/scdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/tdawe1/scdesk/actions/workflows/ci.yml)
+
 Open-source native Linux companions for Sierra Chart:
 
 - **scdesk Pulse** — ES/NQ quality dashboard (Yahoo / calendar). No Sierra Chart process required.
@@ -7,9 +9,15 @@ Open-source native Linux companions for Sierra Chart:
 
 Independent implementation. Not affiliated with Sierra Chart or SCS.
 
+See [CHANGELOG.md](CHANGELOG.md) for the commit map.
+
 ## Status
 
-Pulse v1 feature surface matches the public SCS Market Pulse checklist (independent scoring — see `docs/scoring.md` and `docs/pulse-parity.md`). Journal imports Sierra NDJSON/TradesList/ACSIL fills into a local SQLite journal (dashboard, trades, calendar, gallery, diary, rules, Monte Carlo, auto `.scid` MFE, prop halt). See `docs/journal.md`.
+Pulse v1 feature surface matches the public SCS Market Pulse checklist (independent scoring — `docs/scoring.md`, `docs/pulse-parity.md`).
+
+Journal covers the Sierra file surface plus halt/replay ACSIL (`docs/journal.md`, `docs/journal-parity.md`).
+
+Not in this build: NinjaTrader, ffmpeg rolling video, Windows installer. Put/call is estimated from VIX (no CBOE series on Yahoo).
 
 ## Requirements
 
@@ -20,7 +28,7 @@ Pulse v1 feature surface matches the public SCS Market Pulse checklist (independ
 ## Develop
 
 ```bash
-cargo test
+cargo test --workspace --exclude scdesk-pulse --exclude scdesk-journal
 cd apps/pulse && npm install && npm run tauri dev
 cd apps/journal && npm install && npm run tauri dev
 ```
@@ -32,3 +40,5 @@ Sierra Chart root search order: `SC_ROOT`, `~/.wine/drive_c/SierraChart`, `$WINE
 Keyboard in Pulse: `D`/`S` mode, `Ctrl+R` refresh, `T` always-on-top, `Delete` minimize.
 
 Alerts use the desktop notification daemon (plus a short beep). Pulse checks GitHub releases for updates; it does not auto-install.
+
+Journal sqlite lives at `~/.local/share/scdesk/journal.sqlite`. Settings → **copy sqlite to backups/** writes `~/.local/share/scdesk/backups/`.

@@ -9,7 +9,7 @@ Local SQLite journal for Sierra Chart fills. Independent of SCS Trading Journal.
 - Stores trades at `~/.local/share/scdesk/journal.sqlite` (WAL)
 - Contract specs from `crates/contracts` (MES vs ES tick value)
 - Dashboard: net, win%, PF, expectancy, max DD, equity, bootstrap Monte Carlo (ending R + path DD)
-- Trades table + detail (fills, notes, tags). Paste an image onto a trade for screenshots
+- Trades table + detail (fills, notes, tags). Paste or choose an image for screenshots; drag a crop rectangle
 - Calendar heatmap, R-by-hour, Gallery, Edge (named saved views), Diary (session notes), Rules
 - Tombstones: deleted ids are not resurrected on reimport
 - `$` / `R` toggle. Sim accounts can be excluded from stats
@@ -28,12 +28,12 @@ Local SQLite journal for Sierra Chart fills. Independent of SCS Trading Journal.
 - Prop buffer < 0 is a rule break (feeds the halt file)
 - Filesystem watch on Journal / fills folders (60s poll as fallback)
 - **replay cmd** writes `replay.json`; ACSIL `StartChartReplay` if enabled on the study
+- Checklist template (Settings) and sqlite backup (`~/.local/share/scdesk/backups/`)
 
 ## Not in this build
 
 - Rolling ffmpeg video buffer (out of scope)
 - NinjaTrader connector (out of scope)
-- Interactive gallery crop rectangle (reorder is in)
 
 ACSIL study: `acsil/scdesk_journal.cpp` (remote-build in Sierra).
 

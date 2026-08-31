@@ -88,6 +88,7 @@
     unit: string;
     session_tz: string;
     rules: { max_trades_per_day: number; max_daily_loss: number; max_daily_loss_r: number };
+    checklist: { id: string; label: string; checked: boolean }[];
   };
   type PropSpec = {
     account: string;
@@ -141,6 +142,10 @@
   let shotUrls = $state<Record<string, string>>({});
   let views = $state<SavedView[]>([]);
   let viewName = $state("");
+  let cropIdx = $state<number | null>(null);
+  let cropDraft = $state<{ x: number; y: number; w: number; h: number } | null>(null);
+  let cropOrigin = $state<{ x: number; y: number } | null>(null);
+  let newCheckLabel = $state("");
 
   const unit = $derived(settings?.unit === "R" ? "R" : "$");
   function money(n: number | null | undefined): string {
@@ -317,6 +322,29 @@
     await invoke("save_session", { session });
   }
 
+  const fallbackChecks = [
+    { id: "htf", label: "HTF aligned", checked: false },
+    { id: "news", label: "News clear", checked: false },
+    { id: "risk", label: "Risk defined", checked: false },
+    { id: "aplus", label: "A+ setup", checked: false },
+  ];
+  const defaultChecks = $derived(
+    settings?.checklist?.length ? settings.checklist.map((c) => ({ ...c, checked: false })) : fallbackChecks,
+  );
+
+  async function attachBuf(buf: ArrayBuffer) {
+    if (!selected) return;
+    const bytes = new Uint8Array(buf);
+    let bin = "";
+    bytes.forEach((b) => (bin += String.fromCharCode(b)));
+    const shots = await invoke<Shot[]>("attach_screenshot", {
+      id: selected.id,
+      base64Png: btoa(bin),
+    });
+    selected = { ...selected, screenshots: shots };
+    await refresh();
+  }
+
   async function onPaste(ev: ClipboardEvent) {
     if (!selected) return;
     const item = [...(ev.clipboardData?.items ?? [])].find((i) => i.type.startsWith("image/"));
@@ -324,25 +352,40 @@
     ev.preventDefault();
     const file = item.getAsFile();
     if (!file) return;
-    const buf = await file.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    let bin = "";
-    bytes.forEach((b) => (bin += String.fromCharCode(b)));
-    const b64 = btoa(bin);
-    const shots = await invoke<Shot[]>("attach_screenshot", {
-      id: selected.id,
-      base64Png: b64,
-    });
-    selected = { ...selected, screenshots: shots };
-    await refresh();
+    await attachBuf(await file.arrayBuffer());
   }
 
-  const defaultChecks = [
-    { id: "htf", label: "HTF aligned", checked: false },
-    { id: "news", label: "News clear", checked: false },
-    { id: "risk", label: "Risk defined", checked: false },
-    { id: "aplus", label: "A+ setup", checked: false },
-  ];
+  async function onPickFile(ev: Event) {
+    const f = (ev.currentTarget as HTMLInputElement).files?.[0];
+    if (!f) return;
+    await attachBuf(await f.arrayBuffer());
+    (ev.currentTarget as HTMLInputElement).value = "";
+  }
+
+  function cropCss(crop?: { x: number; y: number; w: number; h: number } | null): string {
+    if (!crop || crop.w <= 0.02 || crop.h <= 0.02) return "";
+    const w = Math.max(0.05, crop.w);
+    const h = Math.max(0.05, crop.h);
+    return `width:${(100 / w).toFixed(2)}%;height:${(100 / h).toFixed(2)}%;margin-left:${(-(crop.x / w) * 100).toFixed(2)}%;margin-top:${(-(crop.y / h) * 100).toFixed(2)}%;max-width:none;max-height:none;object-fit:none;`;
+  }
+
+  function ptrPct(ev: MouseEvent, el: HTMLElement) {
+    const r = el.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
+      y: Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height)),
+    };
+  }
+
+  async function saveCrop(i: number, crop: { x: number; y: number; w: number; h: number } | null) {
+    if (!selected) return;
+    const shots = selected.screenshots.map((s, j) => (j === i ? { ...s, crop } : s));
+    await invoke("set_shots", { id: selected.id, shots });
+    selected = { ...selected, screenshots: shots };
+    cropIdx = null;
+    cropDraft = null;
+    cropOrigin = null;
+  }
 
   async function scanTicks() {
     if (!selected) return;
@@ -626,8 +669,11 @@
               <li>{f.side} {f.qty} @ {f.price} · {f.datetime}</li>
             {/each}
           </ul>
-          <label class="muted">notes (paste image for screenshot)
+          <label class="muted">notes (paste or choose an image)
             <textarea bind:value={noteDraft}></textarea>
+          </label>
+          <label class="muted">add screenshot
+            <input type="file" accept="image/png,image/jpeg,image/webp" onchange={onPickFile} />
           </label>
           <label class="muted">tags
             <input bind:value={tagDraft} placeholder="setup, fade, news" />
@@ -657,13 +703,63 @@
               {#each selected.screenshots as s, i}
                 <div class="shotcard">
                   {#if shotUrls[s.path]}
-                    <img src={shotUrls[s.path]} alt="{selected.symbol_root} shot {i + 1}" />
+                    <div
+                      class="cropframe"
+                      role="presentation"
+                      onmousedown={(e) => {
+                        if (cropIdx !== i) return;
+                        const p = ptrPct(e, e.currentTarget);
+                        cropOrigin = p;
+                        cropDraft = { x: p.x, y: p.y, w: 0, h: 0 };
+                      }}
+                      onmousemove={(e) => {
+                        if (cropIdx !== i || !cropOrigin) return;
+                        const p = ptrPct(e, e.currentTarget);
+                        cropDraft = {
+                          x: Math.min(cropOrigin.x, p.x),
+                          y: Math.min(cropOrigin.y, p.y),
+                          w: Math.abs(p.x - cropOrigin.x),
+                          h: Math.abs(p.y - cropOrigin.y),
+                        };
+                      }}
+                      onmouseup={() => {
+                        if (cropIdx !== i) return;
+                        if (cropDraft && cropDraft.w > 0.03 && cropDraft.h > 0.03) {
+                          void saveCrop(i, cropDraft);
+                        } else {
+                          cropDraft = null;
+                          cropOrigin = null;
+                        }
+                      }}
+                    >
+                      <img
+                        src={shotUrls[s.path]}
+                        alt="{selected.symbol_root} shot {i + 1}"
+                        class:cropping={cropIdx === i}
+                        style={cropIdx === i ? "" : cropCss(s.crop)}
+                      />
+                      {#if cropIdx === i && cropDraft && cropDraft.w > 0}
+                        <i
+                          class="croprect"
+                          style="left:{cropDraft.x * 100}%;top:{cropDraft.y * 100}%;width:{cropDraft.w * 100}%;height:{cropDraft.h * 100}%"
+                        ></i>
+                      {/if}
+                    </div>
                   {:else}
                     <span class="muted">{s.path}</span>
                   {/if}
                   <div class="shotrow">
                     <button onclick={() => moveShot(i, -1)}>up</button>
                     <button onclick={() => moveShot(i, 1)}>dn</button>
+                    <button
+                      class:on={cropIdx === i}
+                      onclick={() => {
+                        cropIdx = cropIdx === i ? null : i;
+                        cropDraft = null;
+                        cropOrigin = null;
+                      }}>crop</button
+                    >
+                    <button onclick={() => saveCrop(i, null)}>uncrop</button>
                     <button onclick={() => dropShot(i)}>del</button>
                   </div>
                 </div>
@@ -719,7 +815,13 @@
       {#each gallery as t}
         <button type="button" class="gal" onclick={() => pick(t)}>
           {#if t.screenshots[0] && shotUrls[t.screenshots[0].path]}
-            <img src={shotUrls[t.screenshots[0].path]} alt="{t.symbol_root} {t.trading_day}" />
+            <div class="cropframe galframe">
+              <img
+                src={shotUrls[t.screenshots[0].path]}
+                alt="{t.symbol_root} {t.trading_day}"
+                style={cropCss(t.screenshots[0].crop)}
+              />
+            </div>
           {/if}
           <div class="k">{t.symbol_root} · {t.trading_day}</div>
           <div class={cls(val(t))}>{money(val(t))}</div>
@@ -874,6 +976,51 @@
           onchange={(e) => persistSettings({ session_tz: e.currentTarget.value.trim() || "America/Chicago" })}
         />
       </label>
+      <h3>checklist template</h3>
+      {#each settings.checklist as c, i}
+        <div class="shotrow">
+          <input
+            value={c.label}
+            onchange={(e) => {
+              const checklist = settings!.checklist.map((x, j) =>
+                j === i ? { ...x, label: e.currentTarget.value } : x,
+              );
+              void persistSettings({ checklist });
+            }}
+          />
+          <button
+            onclick={() =>
+              persistSettings({
+                checklist: settings!.checklist.filter((_, j) => j !== i),
+              })}>×</button
+          >
+        </div>
+      {/each}
+      <div class="shotrow">
+        <input placeholder="new item" bind:value={newCheckLabel} />
+        <button
+          onclick={() => {
+            const label = newCheckLabel.trim();
+            if (!label || !settings) return;
+            const id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24);
+            void persistSettings({
+              checklist: [...settings.checklist, { id: id || `c${settings.checklist.length}`, label, checked: false }],
+            });
+            newCheckLabel = "";
+          }}>add</button
+        >
+      </div>
+      <h3>backup</h3>
+      <button
+        onclick={async () => {
+          try {
+            const p = await invoke<string>("backup_db");
+            error = `backup ${p}`;
+          } catch (e) {
+            error = String(e);
+          }
+        }}>copy sqlite to backups/</button
+      >
       <h3>import TradesList TSV</h3>
       <textarea bind:value={tsvDraft} placeholder="paste Sierra TradesList export"></textarea>
       <button onclick={importTsv}>import TSV</button>
@@ -946,7 +1093,11 @@
   .year i.down { background: var(--down); }
   .shotrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .shots { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
-  .shotcard img, .gallery img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+  .cropframe { position: relative; overflow: hidden; border-radius: 6px; border: 1px solid var(--border); max-height: 220px; }
+  .cropframe.galframe { max-height: 110px; }
+  .cropframe img { width: 100%; display: block; }
+  .cropframe img.cropping { cursor: crosshair; max-height: 220px; object-fit: contain; }
+  .croprect { position: absolute; border: 1px solid var(--up); background: color-mix(in srgb, var(--up) 20%, transparent); pointer-events: none; }
   .gallery img { max-height: 110px; }
   label { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
 </style>
