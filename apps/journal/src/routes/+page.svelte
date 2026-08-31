@@ -61,6 +61,7 @@
     exclude_sim: boolean;
     default_risk_ticks: number;
     unit: string;
+    session_tz: string;
     rules: { max_trades_per_day: number; max_daily_loss: number; max_daily_loss_r: number };
   };
   type PropSpec = {
@@ -112,6 +113,7 @@
   let error = $state<string | null>(null);
   let importing = $state(false);
   let tsvDraft = $state("");
+  let shotUrls = $state<Record<string, string>>({});
 
   const unit = $derived(settings?.unit === "R" ? "R" : "$");
   function money(n: number | null | undefined): string {
@@ -185,17 +187,54 @@
     }
   }
 
-  async function doImport() {
-    importing = true;
+  async function doImport(quiet = false) {
+    if (!quiet) importing = true;
     try {
       const n = await invoke<number>("import_journal");
-      error = n ? `imported ${n} rows` : "no NDJSON found";
-      await refresh();
+      const sc = await invoke<number>("scan_missing_scid");
+      if (!quiet) {
+        error = n || sc ? `imported ${n} · scid ${sc}` : "no new NDJSON / .scid";
+      }
+      if (n || sc || !quiet) await refresh();
     } catch (e) {
-      error = String(e);
+      if (!quiet) error = String(e);
     } finally {
       importing = false;
     }
+  }
+
+  async function loadShot(path: string) {
+    if (!path || shotUrls[path]) return;
+    try {
+      const url = await invoke<string>("shot_data", { path });
+      shotUrls = { ...shotUrls, [path]: url };
+    } catch {
+      /* path not allowed or missing */
+    }
+  }
+
+  async function exportCsv() {
+    try {
+      const f = {
+        ...filter,
+        direction: filter.direction || null,
+        exclude_sim: settings?.exclude_sim ?? false,
+      };
+      const csv = await invoke<string>("export_csv", { filter: f });
+      const blob = new Blob([csv], { type: "text/csv" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "scdesk-trades.csv";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function dropProp(account: string) {
+    await invoke("delete_prop", { account });
+    await refresh();
   }
 
   async function importTsv() {
@@ -314,6 +353,13 @@
     selected = { ...selected, screenshots: shots };
   }
 
+  async function dropShot(i: number) {
+    if (!selected) return;
+    const shots = selected.screenshots.filter((_, j) => j !== i);
+    await invoke("set_shots", { id: selected.id, shots });
+    selected = { ...selected, screenshots: shots };
+  }
+
   function heatCell(d: Day | null): string {
     if (!d) return "";
     const v = unit === "R" ? d.r : d.pnl;
@@ -359,13 +405,25 @@
     await refresh();
   }
 
+  $effect(() => {
+    const paths = [
+      ...(selected?.screenshots.map((s) => s.path) ?? []),
+      ...gallery.flatMap((t) => t.screenshots.slice(0, 1).map((s) => s.path)),
+    ];
+    for (const p of paths) void loadShot(p);
+  });
+
   onMount(() => {
     void (async () => {
       settings = await invoke<Settings>("get_settings");
       await doImport();
     })();
     window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
+    const tick = setInterval(() => void doImport(true), 30_000);
+    return () => {
+      window.removeEventListener("paste", onPaste);
+      clearInterval(tick);
+    };
   });
 </script>
 
@@ -380,7 +438,8 @@
     <div class="spacer"></div>
     <button class:on={unit === "$"} onclick={() => persistSettings({ unit: "$" })}>$</button>
     <button class:on={unit === "R"} onclick={() => persistSettings({ unit: "R" })}>R</button>
-    <button onclick={doImport} disabled={importing}>{importing ? "import…" : "import"}</button>
+    <button onclick={() => void exportCsv()}>csv</button>
+    <button onclick={() => void doImport()} disabled={importing}>{importing ? "import…" : "import"}</button>
   </header>
   {#if error}<div class="err">{error}</div>{/if}
 
@@ -562,10 +621,17 @@
           {#if selected.screenshots.length}
             <div class="shots">
               {#each selected.screenshots as s, i}
-                <div class="shotrow">
-                  <span class="muted">{s.path}</span>
-                  <button onclick={() => moveShot(i, -1)}>up</button>
-                  <button onclick={() => moveShot(i, 1)}>dn</button>
+                <div class="shotcard">
+                  {#if shotUrls[s.path]}
+                    <img src={shotUrls[s.path]} alt="{selected.symbol_root} shot {i + 1}" />
+                  {:else}
+                    <span class="muted">{s.path}</span>
+                  {/if}
+                  <div class="shotrow">
+                    <button onclick={() => moveShot(i, -1)}>up</button>
+                    <button onclick={() => moveShot(i, 1)}>dn</button>
+                    <button onclick={() => dropShot(i)}>del</button>
+                  </div>
                 </div>
               {/each}
             </div>
@@ -599,7 +665,7 @@
       {/each}
     </div>
     <section class="panel">
-      <h2>R by hour (UTC)</h2>
+      <h2>R by hour ({settings?.session_tz ?? "America/Chicago"})</h2>
       <div class="hours">
         {#each hours as [h, r, n]}
           {#if n}
@@ -618,6 +684,9 @@
     <div class="gallery">
       {#each gallery as t}
         <button type="button" class="gal" onclick={() => pick(t)}>
+          {#if t.screenshots[0] && shotUrls[t.screenshots[0].path]}
+            <img src={shotUrls[t.screenshots[0].path]} alt="{t.symbol_root} {t.trading_day}" />
+          {/if}
           <div class="k">{t.symbol_root} · {t.trading_day}</div>
           <div class={cls(val(t))}>{money(val(t))}</div>
           <div class="muted">{t.screenshots.length} shot(s)</div>
@@ -720,6 +789,12 @@
           onchange={(e) => persistSettings({ default_risk_ticks: Number(e.currentTarget.value) })}
         />
       </label>
+      <label class="muted">session timezone (IANA)
+        <input
+          value={settings.session_tz}
+          onchange={(e) => persistSettings({ session_tz: e.currentTarget.value.trim() || "America/Chicago" })}
+        />
+      </label>
       <h3>import TradesList TSV</h3>
       <textarea bind:value={tsvDraft} placeholder="paste Sierra TradesList export"></textarea>
       <button onclick={importTsv}>import TSV</button>
@@ -727,7 +802,10 @@
       {#if props.length}
         <ul>
           {#each props as p}
-            <li>{p.account} · eq {money(p.equity)} · buffer {money(p.buffer)}</li>
+            <li>
+              {p.account} · eq {money(p.equity)} · buffer {money(p.buffer)}
+              <button onclick={() => dropProp(p.account)}>remove</button>
+            </li>
           {/each}
         </ul>
       {/if}
@@ -788,5 +866,8 @@
   .year i.up { background: var(--up); }
   .year i.down { background: var(--down); }
   .shotrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .shots { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+  .shotcard img, .gallery img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+  .gallery img { max-height: 110px; }
   label { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
 </style>

@@ -14,8 +14,8 @@ pub use ndjson::{
 };
 pub use stats::{
     calendar, drawdown_series, equity_curve, hour_histogram, kpis, mfe_mae_points, monte_carlo,
-    r_histogram, CalendarDay, EquityPoint, Kpis, MonteCarlo, PropSnapshot, PropSpec, RuleBreak,
-    Rules,
+    r_histogram, trades_csv, CalendarDay, EquityPoint, Kpis, MonteCarlo, PropSnapshot, PropSpec,
+    RuleBreak, Rules,
 };
 pub use tradeslist::parse_tradeslist;
 
@@ -163,6 +163,34 @@ pub fn compute_risk(
 
 pub fn r_value(net_pnl: f64, initial_risk: Option<f64>) -> Option<f64> {
     initial_risk.filter(|r| *r > 1e-9).map(|r| net_pnl / r)
+}
+
+/// Scan Sierra `.scid` folders for MFE/MAE on one trade.
+pub fn scid_for_trade(t: &Trade, dirs: &[std::path::PathBuf]) -> Option<scid::MaeMfe> {
+    if t.open_epoch_ms <= 0 {
+        return None;
+    }
+    let end = t.close_epoch_ms.unwrap_or(t.open_epoch_ms);
+    let long = t.direction.eq_ignore_ascii_case("LONG");
+    for dir in dirs {
+        let Some(path) = scid::find_scid(dir, &t.symbol_raw)
+            .or_else(|| scid::find_scid(dir, &t.listed))
+            .or_else(|| scid::find_scid(dir, &t.symbol_root))
+        else {
+            continue;
+        };
+        if let Ok(Some(scan)) = scid::scan_file(
+            &path,
+            t.open_epoch_ms,
+            end,
+            long,
+            t.entry_price,
+            30 * 60 * 1000,
+        ) {
+            return Some(scan);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -345,6 +373,74 @@ mod tests {
         let tiles = j.prop_tiles(&TradeFilter::default()).unwrap();
         assert_eq!(tiles.len(), 1);
         assert!(tiles[0].buffer > 0.0);
+        j.delete_prop("SIM1").unwrap();
+        assert!(j.list_prop().unwrap().is_empty());
+        let csv = j.export_csv(&TradeFilter::default()).unwrap();
+        assert!(csv.contains("symbol"));
+        assert!(csv.contains("MNQU6"));
+    }
+
+    #[test]
+    fn hour_histogram_chicago_not_utc() {
+        use chrono::TimeZone;
+        let ms = chrono_tz::America::Chicago
+            .with_ymd_and_hms(2026, 8, 1, 10, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let mut t = imported_to_trade(
+            &parse_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson")).unwrap()[0],
+            8.0,
+        );
+        t.open_epoch_ms = ms;
+        t.is_closed = true;
+        t.r_value = Some(1.0);
+        let hours = hour_histogram(std::slice::from_ref(&t), "America/Chicago");
+        assert_eq!(hours[10].2, 1, "10:00 Chicago");
+        assert_eq!(hours[15].2, 0, "not 15:00 UTC");
+    }
+
+    #[test]
+    fn scan_missing_scid_from_synthetic_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(&dir.path().join("j.sqlite")).unwrap();
+        j.import_ndjson_text(include_str!("../../../testdata/trades_sample.ndjson"))
+            .unwrap();
+        let t = j
+            .list_trades(&TradeFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|x| x.symbol_root == "NQ")
+            .unwrap();
+        let scid_dir = dir.path().join("scid");
+        std::fs::create_dir_all(&scid_dir).unwrap();
+        let path = scid_dir.join("NQU6.scid");
+        let mut bytes = vec![0u8; scid::HEADER_SIZE as usize];
+        bytes[0..4].copy_from_slice(b"SCID");
+        let start = scid::unix_ms_to_ole_us(t.open_epoch_ms);
+        for i in 0..12 {
+            let mut rec = [0u8; 40];
+            rec[0..8].copy_from_slice(&(start + i * 1_000_000).to_le_bytes());
+            let px = t.entry_price as f32 - i as f32; // short: down is MFE
+            rec[8..12].copy_from_slice(&px.to_le_bytes());
+            rec[12..16].copy_from_slice(&(px + 0.5).to_le_bytes());
+            rec[16..20].copy_from_slice(&(px - 0.5).to_le_bytes());
+            rec[20..24].copy_from_slice(&px.to_le_bytes());
+            bytes.extend_from_slice(&rec);
+        }
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        let n = j.scan_missing_scid(&[scid_dir], 20).unwrap();
+        assert_eq!(n, 1);
+        let got = j.get_trade(&t.id).unwrap().unwrap();
+        assert_eq!(got.mae_source.as_deref(), Some("scid"));
+        assert!(got.mfe.unwrap_or(0.0) > 0.0);
+        assert_eq!(
+            j.scan_missing_scid(&[dir.path().join("scid")], 20).unwrap(),
+            0
+        );
     }
 
     #[test]

@@ -353,10 +353,11 @@ pub fn mfe_mae_points(trades: &[Trade]) -> Vec<(f64, f64, f64)> {
         .collect()
 }
 
-pub fn hour_histogram(trades: &[Trade]) -> Vec<(u32, f64, usize)> {
+pub fn hour_histogram(trades: &[Trade], tz_name: &str) -> Vec<(u32, f64, usize)> {
+    let tz = parse_tz(tz_name);
     let mut buckets = vec![(0.0, 0usize); 24];
     for t in trades.iter().filter(|t| t.is_closed) {
-        let hour = ((t.open_epoch_ms.div_euclid(3_600_000)) % 24) as usize;
+        let hour = hour_in_tz(t.open_epoch_ms, tz) as usize;
         buckets[hour].0 += t.r_value.unwrap_or(0.0);
         buckets[hour].1 += 1;
     }
@@ -365,4 +366,67 @@ pub fn hour_histogram(trades: &[Trade]) -> Vec<(u32, f64, usize)> {
         .enumerate()
         .map(|(h, (r, n))| (h as u32, r, n))
         .collect()
+}
+
+pub fn parse_tz(name: &str) -> chrono_tz::Tz {
+    name.parse().unwrap_or(chrono_tz::America::Chicago)
+}
+
+pub fn hour_in_tz(epoch_ms: i64, tz: chrono_tz::Tz) -> u32 {
+    use chrono::Timelike;
+    chrono::DateTime::from_timestamp_millis(epoch_ms)
+        .map(|utc| utc.with_timezone(&tz).hour())
+        .unwrap_or(0)
+}
+
+fn csv_cell(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn csv_opt(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:.4}")).unwrap_or_default()
+}
+
+/// RFC4180-ish trade export.
+pub fn trades_csv(trades: &[Trade]) -> String {
+    let mut out = String::from(
+        "id,trading_day,symbol,direction,qty,entry,exit,net_pnl,r,mfe,mae,account,source,tags,notes\n",
+    );
+    for t in trades {
+        out.push_str(&csv_cell(&t.id));
+        out.push(',');
+        out.push_str(&csv_cell(&t.trading_day));
+        out.push(',');
+        out.push_str(&csv_cell(&t.symbol_raw));
+        out.push(',');
+        out.push_str(&csv_cell(&t.direction));
+        out.push(',');
+        out.push_str(&format!("{:.4}", t.qty));
+        out.push(',');
+        out.push_str(&format!("{:.4}", t.entry_price));
+        out.push(',');
+        out.push_str(&csv_opt(t.exit_price));
+        out.push(',');
+        out.push_str(&format!("{:.4}", t.net_pnl));
+        out.push(',');
+        out.push_str(&csv_opt(t.r_value));
+        out.push(',');
+        out.push_str(&csv_opt(t.mfe));
+        out.push(',');
+        out.push_str(&csv_opt(t.mae));
+        out.push(',');
+        out.push_str(&csv_cell(&t.account));
+        out.push(',');
+        out.push_str(&csv_cell(&t.source));
+        out.push(',');
+        out.push_str(&csv_cell(&t.tags.join(";")));
+        out.push(',');
+        out.push_str(&csv_cell(&t.notes));
+        out.push('\n');
+    }
+    out
 }

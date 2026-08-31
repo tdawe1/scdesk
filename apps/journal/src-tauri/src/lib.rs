@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use journal_core::{
-    CheckItem, Journal, Kpis, MonteCarlo, PropSnapshot, PropSpec, RuleBreak, Rules, Session, Shot,
-    Trade, TradeFilter,
+    scid_for_trade, CheckItem, Journal, Kpis, MonteCarlo, PropSnapshot, PropSpec, RuleBreak, Rules,
+    Session, Shot, Trade, TradeFilter,
 };
 use serde::{Deserialize, Serialize};
 use sierra_paths::{discover_from_os, Discovery};
@@ -24,6 +24,8 @@ struct AppSettings {
     unit: String,
     #[serde(default)]
     rules: Rules,
+    #[serde(default = "chicago")]
+    session_tz: String,
 }
 
 fn eight() -> f64 {
@@ -31,6 +33,9 @@ fn eight() -> f64 {
 }
 fn dollar() -> String {
     "$".into()
+}
+fn chicago() -> String {
+    "America/Chicago".into()
 }
 
 impl Default for AppSettings {
@@ -40,8 +45,51 @@ impl Default for AppSettings {
             default_risk_ticks: 8.0,
             unit: "$".into(),
             rules: Rules::default(),
+            session_tz: chicago(),
         }
     }
+}
+
+fn scid_dirs() -> Vec<PathBuf> {
+    let disc = discover_from_os();
+    disc.primary
+        .iter()
+        .chain(disc.extras.iter())
+        .map(|r| r.scid_dir.clone())
+        .collect()
+}
+
+fn shot_allowed(path: &std::path::Path) -> bool {
+    let Ok(canon) = path.canonicalize() else {
+        return false;
+    };
+    if !canon.is_file() {
+        return false;
+    }
+    let ext = canon
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "png" && ext != "jpg" && ext != "jpeg" && ext != "webp" {
+        return false;
+    }
+    let mut roots = Vec::new();
+    if let Some(d) = dirs::data_dir() {
+        roots.push(d.join("scdesk"));
+    }
+    let disc = discover_from_os();
+    for r in disc.primary.iter().chain(disc.extras.iter()) {
+        roots.push(r.root.clone());
+        roots.push(r.journal_dir.clone());
+        roots.push(r.data_dir.clone());
+    }
+    roots.iter().any(|r| {
+        let Ok(base) = r.canonicalize() else {
+            return canon.starts_with(r);
+        };
+        canon.starts_with(base)
+    })
 }
 
 fn db_path() -> PathBuf {
@@ -207,11 +255,17 @@ fn hours(
     filter: TradeFilter,
 ) -> Result<Vec<(u32, f64, usize)>, String> {
     let f = with_filter(&state, filter);
+    let tz = state
+        .settings
+        .lock()
+        .map_err(|e| e.to_string())?
+        .session_tz
+        .clone();
     state
         .journal
         .lock()
         .map_err(|e| e.to_string())?
-        .hours(&f)
+        .hours(&f, &tz)
         .map_err(|e| e.to_string())
 }
 
@@ -448,37 +502,75 @@ fn scan_scid(state: tauri::State<AppState>, id: String) -> Result<Option<scid::M
         .get_trade(&id)
         .map_err(|e| e.to_string())?
         .ok_or("missing trade")?;
-    let disc = discover_from_os();
-    let dirs: Vec<_> = disc
-        .primary
-        .iter()
-        .chain(disc.extras.iter())
-        .map(|r| r.scid_dir.clone())
-        .collect();
     drop(j);
-    let end = t.close_epoch_ms.unwrap_or(t.open_epoch_ms);
-    let long = t.direction == "LONG";
-    for dir in dirs {
-        let Some(path) = scid::find_scid(&dir, &t.symbol_raw)
-            .or_else(|| scid::find_scid(&dir, &t.listed))
-            .or_else(|| scid::find_scid(&dir, &t.symbol_root))
-        else {
-            continue;
-        };
-        if let Ok(Some(scan)) = scid::scan_file(
-            &path,
-            t.open_epoch_ms,
-            end,
-            long,
-            t.entry_price,
-            30 * 60 * 1000,
-        ) {
-            let j = state.journal.lock().map_err(|e| e.to_string())?;
-            j.apply_scid(&id, &scan).map_err(|e| e.to_string())?;
-            return Ok(Some(scan));
-        }
+    let dirs = scid_dirs();
+    let Some(scan) = scid_for_trade(&t, &dirs) else {
+        return Ok(None);
+    };
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .apply_scid(&id, &scan)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(scan))
+}
+
+#[tauri::command]
+fn scan_missing_scid(state: tauri::State<AppState>) -> Result<usize, String> {
+    let dirs = scid_dirs();
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .scan_missing_scid(&dirs, 80)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn shot_data(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    if !shot_allowed(&p) {
+        return Err("shot path not allowed".into());
     }
-    Ok(None)
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    let mime = match p
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "image/png",
+    };
+    use base64::Engine;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[tauri::command]
+fn export_csv(state: tauri::State<AppState>, filter: TradeFilter) -> Result<String, String> {
+    let f = with_filter(&state, filter);
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .export_csv(&f)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_prop(state: tauri::State<AppState>, account: String) -> Result<(), String> {
+    state
+        .journal
+        .lock()
+        .map_err(|e| e.to_string())?
+        .delete_prop(&account)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -539,6 +631,7 @@ pub fn run() {
         let _ = journal.import_fills_dir(&extra.data_dir);
         let _ = journal.import_screenshots_dir(&extra.journal_dir.join("screenshots"));
     }
+    let _ = journal.scan_missing_scid(&scid_dirs(), 80);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
@@ -576,6 +669,10 @@ pub fn run() {
             save_prop,
             prop_tiles,
             scan_scid,
+            scan_missing_scid,
+            shot_data,
+            export_csv,
+            delete_prop,
             write_halt,
             write_replay
         ])

@@ -31,5 +31,6 @@ dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -469,8 +469,8 @@ impl Journal {
         Ok(calendar(&self.list_trades(f)?))
     }
 
-    pub fn hours(&self, f: &TradeFilter) -> Result<Vec<(u32, f64, usize)>, JournalError> {
-        Ok(hour_histogram(&self.list_trades(f)?))
+    pub fn hours(&self, f: &TradeFilter, tz: &str) -> Result<Vec<(u32, f64, usize)>, JournalError> {
+        Ok(hour_histogram(&self.list_trades(f)?, tz))
     }
 
     pub fn monte_carlo(&self, f: &TradeFilter, runs: usize) -> Result<MonteCarlo, JournalError> {
@@ -482,7 +482,22 @@ impl Journal {
         f: &TradeFilter,
         rules: &Rules,
     ) -> Result<Vec<RuleBreak>, JournalError> {
-        Ok(rule_breaks(&self.list_trades(f)?, rules))
+        let trades = self.list_trades(f)?;
+        let mut out = rule_breaks(&trades, rules);
+        for spec in self.list_prop()? {
+            let snap = prop_snapshot(&trades, &spec);
+            if snap.buffer < 0.0 {
+                out.push(RuleBreak {
+                    date: spec.account.clone(),
+                    kind: "prop".into(),
+                    text: format!(
+                        "{} buffer {:.0} (floor breached)",
+                        spec.account, snap.buffer
+                    ),
+                });
+            }
+        }
+        Ok(out)
     }
 
     pub fn save_session(&self, s: &Session) -> Result<(), JournalError> {
@@ -603,6 +618,47 @@ impl Journal {
             .iter()
             .map(|s| prop_snapshot(&trades, s))
             .collect())
+    }
+
+    pub fn delete_prop(&self, account: &str) -> Result<(), JournalError> {
+        self.conn.execute(
+            "DELETE FROM prop_accounts WHERE account=?1",
+            params![account],
+        )?;
+        Ok(())
+    }
+
+    pub fn export_csv(&self, f: &TradeFilter) -> Result<String, JournalError> {
+        Ok(super::stats::trades_csv(&self.list_trades(f)?))
+    }
+
+    /// Apply `.scid` MFE/MAE to closed trades that do not already have `mae_source=scid`.
+    pub fn scan_missing_scid(
+        &self,
+        dirs: &[std::path::PathBuf],
+        limit: usize,
+    ) -> Result<usize, JournalError> {
+        if dirs.is_empty() || limit == 0 {
+            return Ok(0);
+        }
+        let trades = self.list_trades(&TradeFilter {
+            closed_only: true,
+            ..TradeFilter::default()
+        })?;
+        let mut n = 0;
+        for t in trades {
+            if t.mae_source.as_deref() == Some("scid") {
+                continue;
+            }
+            if let Some(scan) = super::scid_for_trade(&t, dirs) {
+                self.apply_scid(&t.id, &scan)?;
+                n += 1;
+                if n >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(n)
     }
 }
 

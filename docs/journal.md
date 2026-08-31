@@ -21,7 +21,12 @@ Local SQLite journal for Sierra Chart fills. Independent of SCS Trading Journal.
 - Screenshots folder `{Journal}/screenshots` matched by id/symbol+date
 - Prop-firm tiles (buffer / target remaining); halt file `Data/scdesk/tm_halt.json` when rules break
 - Replay command file `Data/scdesk/replay.json` for an ACSIL/study to pick up
-- Drawdown, R histogram, MAE/MFE scatter, yearly heatmap, checklist, screenshot reorder
+- Drawdown, R histogram, MAE/MFE scatter, yearly heatmap, checklist, screenshot reorder + render
+- Auto `.scid` scan on import (closed trades missing `mae_source=scid`)
+- CSV export of the current filter
+- Session timezone (default America/Chicago) for R-by-hour
+- Prop buffer < 0 is a rule break (feeds the halt file)
+- Import polling every 30s while the app is open
 
 ## Not in this build
 

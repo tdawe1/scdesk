@@ -37,4 +37,4 @@ Independent implementation. Scores and layout are ours. This list is the public 
 
 Scoring is still ours (`scoring.toml` / `score.rs`). After reading their JS we took **shapes**, not tables: 90/10 execution overlay, YES needs a side, breadth U-curve, RSI chop floor, VVIX in vol, ADX ±10, SMA200 distance as a hill. 5m VWAP stays display-only.
 
-Journal remains phase 2 (NDJSON importer), not part of this Pulse checklist.
+Journal is a separate app (`docs/journal.md`), not part of this Pulse checklist.

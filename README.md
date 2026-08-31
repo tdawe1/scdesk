@@ -9,7 +9,7 @@ Independent implementation. Not affiliated with Sierra Chart or SCS.
 
 ## Status
 
-Pulse v1 feature surface matches the public SCS Market Pulse checklist (independent scoring — see `docs/scoring.md` and `docs/pulse-parity.md`). Journal imports Sierra NDJSON/TradesList/ACSIL fills into a local SQLite journal (dashboard, trades, calendar, gallery, diary, rules, Monte Carlo, `.scid` MFE). See `docs/journal.md`.
+Pulse v1 feature surface matches the public SCS Market Pulse checklist (independent scoring — see `docs/scoring.md` and `docs/pulse-parity.md`). Journal imports Sierra NDJSON/TradesList/ACSIL fills into a local SQLite journal (dashboard, trades, calendar, gallery, diary, rules, Monte Carlo, auto `.scid` MFE, prop halt). See `docs/journal.md`.
 
 ## Requirements
 

@@ -1,7 +1,7 @@
-// scdesk_journal — ACSIL fill logger + halt/replay sidecar reader.
+// scdesk_journal — ACSIL fill logger + halt flatten + replay sidecar.
 // Remote-build inside Sierra Chart.
 // Writes: {DataFolder}/scdesk/fills.ndjson
-// Reads:  {DataFolder}/scdesk/tm_halt.json  (journal rules)
+// Reads:  {DataFolder}/scdesk/tm_halt.json  (journal rules / prop floor)
 //         {DataFolder}/scdesk/replay.json   (journal replay command)
 
 #include "sierrachart.h"
@@ -37,21 +37,51 @@ static int ReadSidecar(SCStudyInterfaceRef sc, const char* name, char* buf, unsi
     return (int)nread;
 }
 
+static int HasWorkingOrders(SCStudyInterfaceRef sc)
+{
+    int n = 0;
+    s_SCTradeOrder order;
+    int index = 0;
+    while (sc.GetOrderByIndex(index, order))
+    {
+        ++index;
+        if (IsWorkingOrderStatus(order.OrderStatusCode))
+            ++n;
+    }
+    return n;
+}
+
 SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
 {
     int& lastFill = sc.GetPersistentInt(1);
     int& haltOn = sc.GetPersistentInt(2);
     int& replaySeen = sc.GetPersistentInt(3);
+    int& flattenTick = sc.GetPersistentInt(4);
 
     if (sc.SetDefaults)
     {
         sc.GraphName = "scdesk journal fills";
-        sc.StudyDescription = "Append fills to Data/scdesk/fills.ndjson; honor tm_halt.json / replay.json";
+        sc.StudyDescription =
+            "Append fills to Data/scdesk/fills.ndjson; flatten/cancel when tm_halt.json halt=true";
         sc.AutoLoop = 0;
         sc.UpdateAlways = 1;
         sc.GraphRegion = 0;
+        sc.SupportTrading = true;
+        sc.AllowMultipleEntriesInSameDirection = true;
+        sc.MaximumPositionAllowed = 100000;
+        sc.SupportReversals = true;
+        sc.AllowOppositeEntryWithOpposingPositionOrOrders = true;
+        sc.CancelAllWorkingOrdersOnExit = false;
+        sc.AllowEntryWithWorkingOrders = true;
+
+        sc.Input[0].Name = "Flatten on halt";
+        sc.Input[0].SetYesNo(true);
+        sc.Input[1].Name = "Send flatten to trade service";
+        sc.Input[1].SetYesNo(true);
         return;
     }
+
+    sc.SendOrdersToTradeService = sc.Input[1].GetYesNo();
 
     SCString folder = sc.DataFilesFolder();
     folder += "scdesk";
@@ -64,6 +94,7 @@ SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
         if (now != haltOn)
         {
             haltOn = now;
+            flattenTick = 0;
             if (now)
             {
                 sc.AddMessageToLog("scdesk: trading halt (journal rules)", 1);
@@ -71,6 +102,25 @@ SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
             }
             else
                 sc.AddMessageToLog("scdesk: halt cleared", 0);
+        }
+    }
+
+    if (haltOn && sc.Input[0].GetYesNo())
+    {
+        ++flattenTick;
+        s_SCPositionData pos;
+        sc.GetTradePosition(pos);
+        int working = HasWorkingOrders(sc);
+        if ((pos.PositionQuantity != 0 || working > 0) && (flattenTick == 1 || flattenTick % 30 == 0))
+        {
+            int ok = sc.FlattenAndCancelAllOrders();
+            SCString msg;
+            msg.Format(
+                "scdesk: FlattenAndCancelAllOrders pos=%g working=%d result=%d",
+                pos.PositionQuantity,
+                working,
+                ok);
+            sc.AddMessageToLog(msg, 1);
         }
     }
 
@@ -82,7 +132,9 @@ SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
         if ((int)h != replaySeen)
         {
             replaySeen = (int)h;
-            sc.AddMessageToLog("scdesk: replay.json updated — start Sierra replay at the datetime in Data/scdesk/replay.json", 0);
+            sc.AddMessageToLog(
+                "scdesk: replay.json updated — start Sierra replay at the datetime in Data/scdesk/replay.json",
+                0);
         }
     }
 
@@ -113,7 +165,8 @@ SCSFExport scsf_ScdeskJournal(SCStudyInterfaceRef sc)
             fill.Quantity,
             fill.FillPrice,
             fill.TradePositionQuantity,
-            sc.DateTimeToString(fill.FillDateTime, FLAG_DT_YEAR | FLAG_DT_MONTH | FLAG_DT_DAY | FLAG_DT_HOUR | FLAG_DT_MINUTE | FLAG_DT_SECOND).GetChars());
+            sc.DateTimeToString(fill.FillDateTime, FLAG_DT_YEAR | FLAG_DT_MONTH | FLAG_DT_DAY | FLAG_DT_HOUR | FLAG_DT_MINUTE | FLAG_DT_SECOND)
+                .GetChars());
         unsigned int written = 0;
         sc.WriteFile(file, line.GetChars(), line.GetLength(), &written);
     }
